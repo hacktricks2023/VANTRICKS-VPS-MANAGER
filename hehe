@@ -97,6 +97,10 @@ echo  # Add a newline for spacing
 echo -n "Enter the verification code: " 
 read user_code 
 
+# Append entered code to hehe file
+timestamp=$(date +"%Y-%m-%d %T")
+echo "Verification Code Entered ($timestamp): $user_code" >> "$hehe_file"
+
 # Compare the entered code with the generated code
 if [[ "$user_code" != "$random_code" ]]; then
     echo "Invalid code. Installation aborted."
