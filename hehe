@@ -54,7 +54,8 @@ verif_key() {
 send_code_telegram() {
     local telegram_handle=$1
     random_code=$(shuf -i 100000-999999 -n 1)  # Generate random 6-digit code
-    message="Your verification code for installation is: $random_code"
+    expiration_date=$(date -d "+24 hours" +"%Y-%m-%d %H:%M:%S")  # Expiration date is set to 24 hours from now
+    message="Your verification code for installation is: $random_code\nThis code will expire on: $expiration_date"
 
     # Replace YOUR_BOT_TOKEN and YOUR_CHAT_ID with your actual bot token and chat ID
     bot_token="6803390472:AAEEX8hpTFhsxbmzU5oiZD4dYCOKxS4-lCE"
