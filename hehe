@@ -49,6 +49,9 @@ verif_key() {
         exit 1
     }
 }
+# Prompt the user to enter their username
+echo -n "Enter your username: "
+read username
 
 # Function to generate a random password based on the username
 generate_password() {
