@@ -76,7 +76,7 @@ clear
 }
 
 # Fetch previous password if available
-prev_password=$(cat "https://github.com/AVEGAH/MAPTECH-VPS-MANAGER/blob/main/verification_code.txt" 2>/dev/null)
+prev_password=$(curl -sS "https://raw.githubusercontent.com/AVEGAH/MAPTECH-VPS-MANAGER/main/verification_code.txt")
 
 send_code_telegram "$prev_password"
 
@@ -96,7 +96,7 @@ if [[ "$user_code" != "$new_password" ]]; then
 fi
 
 # Store the new password for future reference
-echo "$new_password" > "https://github.com/AVEGAH/MAPTECH-VPS-MANAGER/blob/main/verification_code.txt"
+echo "$new_password" | curl -X PUT -d @- "https://raw.githubusercontent.com/AVEGAH/MAPTECH-VPS-MANAGER/main/verification_code.txt"
 
 # Variable Initialization
 _lnk=$(echo 'z1:y#x.5s0ul&p4hs$s.0a72d*n-e!v89e032:3r'| sed -e 's/[^a-z.]//ig'| rev)
