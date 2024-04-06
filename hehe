@@ -50,26 +50,21 @@ verif_key() {
     }
 }
 
+
+
 # Function to generate random code and send to Telegram handle
 send_code_telegram() {
     local telegram_handle=$1
-    prev_password="$2"  # Store the previous password
-    new_password=$(shuf -i 100000-999999 -n 1)  # Generate new 6-digit code
+    random_code=$(shuf -i 100000-999999 -n 1)  # Generate random 6-digit code
     expiration_date=$(date -d "+24 hours" +"%Y-%m-%d %H:%M:%S")  # Expiration date is set to 24 hours from now
-    message="Your verification codes for installation are:\nPrevious code: $prev_password\nNew code: $new_password\nBoth codes will expire on: $expiration_date"
+    message="Your verification code for installation is: $random_code\nThis code will expire on: $expiration_date"
 
     # Replace YOUR_BOT_TOKEN and YOUR_CHAT_ID with your actual bot token and chat ID
     bot_token="6803390472:AAEEX8hpTFhsxbmzU5oiZD4dYCOKxS4-lCE"
     chat_id="5989863155"
 
-     # Send message to Telegram
+    # Send message to Telegram
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
-    
-    # Write the new verification code to the verification_code.txt file on GitHub
-    echo "$new_password" > verification_code.txt
-    git add verification_code.txt
-    git commit -m "Update verification code"
-    git push origin main > /dev/null
 }
 
 clear
@@ -81,10 +76,17 @@ clear
     exit 0
 }
 
-# Fetch previous password if available
-prev_password=$(curl -sS "https://raw.githubusercontent.com/AVEGAH/MAPTECH-VPS-MANAGER/main/verification_code.txt")
+send_code_telegram
+# Check if the vcheck folder exists, if not create it
+    if [[ ! -d "/root/vcheck" ]]; then
+        mkdir -p /root/vcheck
+    fi
 
-send_code_telegram "$prev_password"
+    # Check if the storage file exists, if not create it
+    if [[ ! -f "$storage_file" ]]; then
+        touch "$storage_file"
+        chmod 777 "$storage_file"
+    fi
 
 # Prompt the user to enter the verification code
 msg -bar2
@@ -95,14 +97,11 @@ echo  # Add a newline for spacing
 echo -n "Enter the verification code: " 
 read user_code 
 
-# Compare the entered code with the new password
-if [[ "$user_code" != "$new_password" ]]; then
+# Compare the entered code with the generated code
+if [[ "$user_code" != "$random_code" ]]; then
     echo "Invalid code. Installation aborted."
     exit 1
 fi
-
-# Store the new password for future reference
-echo "$new_password" | curl -X PUT -d @- "https://raw.githubusercontent.com/AVEGAH/MAPTECH-VPS-MANAGER/main/verification_code.txt"
 
 # Variable Initialization
 _lnk=$(echo 'z1:y#x.5s0ul&p4hs$s.0a72d*n-e!v89e032:3r'| sed -e 's/[^a-z.]//ig'| rev)
@@ -132,7 +131,7 @@ display_countdown_timer() {
 }
 
 # Display countdown timer
-display_countdown_timer "$expiration_date"
+    display_countdown_timer "$expiration_date"
 
 # Welcome message
 echo -e "\033[1;31m\033[0m"
