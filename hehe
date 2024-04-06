@@ -7,6 +7,9 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
+sudo apt install figlet
+
+
 # Function to display a progress bar
 fun_bar() {
     comando[0]="$1"
