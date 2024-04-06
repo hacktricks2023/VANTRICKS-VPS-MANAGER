@@ -64,10 +64,6 @@ send_code_telegram() {
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
 }
 
-msg -bar2
-figlet " -MAPTECH- -@maptechgh-" | lolcat
-echo "Contact @maptechgh on telegram for verification." | figlet | lolcat
-
 clear
 
 # Check for root privilege
@@ -82,7 +78,7 @@ send_code_telegram
 # Prompt the user to enter the verification code
 msg -bar2
 figlet " -MAPTECH- -@maptechgh-" | lolcat
-echo "Contact @maptechgh on telegram for verification." | figlet | lolcat
+echo "Contact @maptechgh on telegram for verification." | figlet -f small | lolcat
 
 echo -n "Enter the verification code: " 
 read user_code 
