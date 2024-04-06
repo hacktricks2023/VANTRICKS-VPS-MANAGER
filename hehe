@@ -72,6 +72,8 @@ clear
 send_code_telegram
 
 # Prompt the user to enter the verification code
+msg -bar2
+figlet " -SSH-" | lolcat
 read -p "Enter the verification code: " user_code
 
 # Compare the entered code with the generated code
