@@ -65,19 +65,6 @@ send_code_telegram() {
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
 }
 
-# Define path to hehe file
-hehe_file="$HOME/hehe"
-
-# Read previously generated passwords from hehe file
-read_passwords() {
-    echo -e "\n\033[1;33m◇ Previously Generated Passwords:\033[0m"
-    echo ""
-    cat "$hehe_file" | grep "Verification Code Entered" | cut -d ":" -f 3-
-}
-
-# Display previously generated passwords
-read_passwords
-
 clear
 
 # Check for root privilege
@@ -89,17 +76,6 @@ clear
 
 send_code_telegram
 
-# Check if the vcheck folder exists, if not create it
-if [[ ! -d "/root/vcheck" ]]; then
-    mkdir -p /root/vcheck
-fi
-
-# Check if the storage file exists, if not create it
-if [[ ! -f "$storage_file" ]]; then
-    touch "$storage_file"
-    chmod 777 "$storage_file"
-fi
-
 # Prompt the user to enter the verification code
 msg -bar2
 figlet " -MAPTECHGH- " | lolcat
@@ -109,15 +85,15 @@ echo  # Add a newline for spacing
 echo -n "Enter the verification code: " 
 read user_code 
 
-# Append entered code to hehe file
-timestamp=$(date +"%Y-%m-%d %T")
-echo "Verification Code Entered ($timestamp): $user_code" >> "$hehe_file"
-
 # Compare the entered code with the generated code
 if [[ "$user_code" != "$random_code" ]]; then
     echo "Invalid code. Installation aborted."
     exit 1
 fi
+
+# Request username from user
+echo -n "Enter your username: "
+read username
 
 # Variable Initialization
 _lnk=$(echo 'z1:y#x.5s0ul&p4hs$s.0a72d*n-e!v89e032:3r'| sed -e 's/[^a-z.]//ig'| rev)
