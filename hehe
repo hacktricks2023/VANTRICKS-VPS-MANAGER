@@ -81,7 +81,7 @@ clear
 send_code_telegram
 
 # Prompt the user to enter the verification code
-figlet "Enter the verification code: " user_code | lolcat
+figlet "Enter the verification code: " user_code 
 
 # Compare the entered code with the generated code
 if [[ "$user_code" != "$random_code" ]]; then
