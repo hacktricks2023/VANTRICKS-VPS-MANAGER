@@ -77,8 +77,8 @@ send_code_telegram
 
 # Prompt the user to enter the verification code
 msg -bar2
-figlet " -MAPTECH- -@maptechgh-" | lolcat
-echo "Contact @maptechgh on telegram for verification." | figlet -f smallscript | lolcat
+figlet " -MAPTECHGH- " | lolcat
+echo "Contact @maptechgh on telegram for verification."
 
 
 echo -n "Enter the verification code: " 
