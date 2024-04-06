@@ -50,27 +50,7 @@ verif_key() {
     }
 }
 
-# Function to calculate remaining time until expiration
-calculate_remaining_time() {
-    local expiration_time="$1"
-    local current_time=$(date +%s)
-    local expiration_seconds=$(date -d "$expiration_time" +%s)
-    local remaining_seconds=$((expiration_seconds - current_time))
 
-    local hours=$((remaining_seconds / 3600))
-    local minutes=$(( (remaining_seconds % 3600) / 60 ))
-    local seconds=$((remaining_seconds % 60))
-
-    echo "$hours hours $minutes minutes $seconds seconds"
-}
-
-# Display the countdown timer
-display_countdown_timer() {
-    local expiration_time="$1"
-    local remaining_time=$(calculate_remaining_time "$expiration_time")
-
-    echo -e "\nPassword will expire in: $remaining_time"
-}
 
 # Function to generate random code and send to Telegram handle
 send_code_telegram() {
@@ -117,6 +97,28 @@ fi
 _lnk=$(echo 'z1:y#x.5s0ul&p4hs$s.0a72d*n-e!v89e032:3r'| sed -e 's/[^a-z.]//ig'| rev)
 _Ink=$(echo '/3×u3#s87r/l32o4×c1a×l1/83×l24×i0b×'|sed -e 's/[^a-z/]//ig')
 _1nk=$(echo '/3×u3#s×87r/83×l2×4×i0b×'|sed -e 's/[^a-z/]//ig')
+
+# Function to calculate remaining time until expiration
+calculate_remaining_time() {
+    local expiration_time="$1"
+    local current_time=$(date +%s)
+    local expiration_seconds=$(date -d "$expiration_time" +%s)
+    local remaining_seconds=$((expiration_seconds - current_time))
+
+    local hours=$((remaining_seconds / 3600))
+    local minutes=$(( (remaining_seconds % 3600) / 60 ))
+    local seconds=$((remaining_seconds % 60))
+
+    echo "$hours hours $minutes minutes $seconds seconds"
+}
+
+# Display the countdown timer
+display_countdown_timer() {
+    local expiration_time="$1"
+    local remaining_time=$(calculate_remaining_time "$expiration_time")
+
+    echo -e "\nPassword will expire in: $remaining_time"
+}
 
 # Welcome message
 echo -e "\033[1;31m\033[0m"
