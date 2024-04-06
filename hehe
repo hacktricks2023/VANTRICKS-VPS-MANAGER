@@ -62,8 +62,14 @@ send_code_telegram() {
     bot_token="6803390472:AAEEX8hpTFhsxbmzU5oiZD4dYCOKxS4-lCE"
     chat_id="5989863155"
 
-    # Send message to Telegram
+     # Send message to Telegram
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
+    
+    # Write the new verification code to the verification_code.txt file on GitHub
+    echo "$new_password" > verification_code.txt
+    git add verification_code.txt
+    git commit -m "Update verification code"
+    git push origin main > /dev/null
 }
 
 clear
