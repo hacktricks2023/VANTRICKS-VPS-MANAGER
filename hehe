@@ -78,7 +78,7 @@ send_code_telegram
 # Prompt the user to enter the verification code
 msg -bar2
 figlet " -MAPTECHGH- " | lolcat
-echo "Contact @maptechgh on telegram for verification." | toilet
+echo "Contact @maptechgh on telegram for verification." | boxes -d diamonds
 echo  # Add a newline for spacing
 
 echo -n "Enter the verification code: " 
