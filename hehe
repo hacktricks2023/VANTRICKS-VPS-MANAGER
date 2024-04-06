@@ -49,7 +49,6 @@ verif_key() {
         exit 1
     }
 }
-#!/bin/bash
 
 # Function to generate random code and send to Telegram handle
 send_code_telegram() {
@@ -63,11 +62,11 @@ send_code_telegram() {
 
     # Send message to Telegram
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
+}
 
 msg -bar2
 figlet " -MAPTECH- -@maptechgh-" | lolcat
-    echo "Contact @maptechgh on telegram for verification.)"
-
+echo "Contact @maptechgh on telegram for verification."
 
 clear
 
@@ -81,7 +80,8 @@ clear
 send_code_telegram
 
 # Prompt the user to enter the verification code
- "Enter the verification code: " user_code 
+echo -n "Enter the verification code: " 
+read user_code 
 
 # Compare the entered code with the generated code
 if [[ "$user_code" != "$random_code" ]]; then
