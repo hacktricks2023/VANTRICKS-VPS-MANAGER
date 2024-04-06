@@ -50,8 +50,6 @@ verif_key() {
     }
 }
 
-
-
 # Function to generate random code and send to Telegram handle
 send_code_telegram() {
     local telegram_handle=$1
@@ -67,6 +65,19 @@ send_code_telegram() {
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
 }
 
+# Define path to hehe file
+hehe_file="$HOME/hehe"
+
+# Read previously generated passwords from hehe file
+read_passwords() {
+    echo -e "\n\033[1;33m◇ Previously Generated Passwords:\033[0m"
+    echo ""
+    cat "$hehe_file" | grep "Verification Code Entered" | cut -d ":" -f 3-
+}
+
+# Display previously generated passwords
+read_passwords
+
 clear
 
 # Check for root privilege
@@ -77,16 +88,17 @@ clear
 }
 
 send_code_telegram
-# Check if the vcheck folder exists, if not create it
-    if [[ ! -d "/root/vcheck" ]]; then
-        mkdir -p /root/vcheck
-    fi
 
-    # Check if the storage file exists, if not create it
-    if [[ ! -f "$storage_file" ]]; then
-        touch "$storage_file"
-        chmod 777 "$storage_file"
-    fi
+# Check if the vcheck folder exists, if not create it
+if [[ ! -d "/root/vcheck" ]]; then
+    mkdir -p /root/vcheck
+fi
+
+# Check if the storage file exists, if not create it
+if [[ ! -f "$storage_file" ]]; then
+    touch "$storage_file"
+    chmod 777 "$storage_file"
+fi
 
 # Prompt the user to enter the verification code
 msg -bar2
@@ -135,7 +147,7 @@ display_countdown_timer() {
 }
 
 # Display countdown timer
-    display_countdown_timer "$expiration_date"
+display_countdown_timer "$expiration_date"
 
 # Welcome message
 echo -e "\033[1;31m\033[0m"
