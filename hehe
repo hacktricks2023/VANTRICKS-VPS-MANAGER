@@ -66,8 +66,9 @@ send_code_telegram() {
 
 msg -bar2
 figlet " -MAPTECH- -@maptechgh-" | lolcat
-    echo figlet "Contact @maptechgh on telegram for verification." | lolcat
-}
+    echo""
+figlet "Contact @maptechgh on telegram for verification.)" | lolcat
+
 
 clear
 
