@@ -80,12 +80,13 @@ send_code_telegram
 
 # Prompt the user to enter the verification code
 msg -bar2
-figlet " -MAPTECHGH- " | figlet
+figlet " -MAPTECHGH- "
 echo "Contact @maptechgh on telegram for verification."
 echo  # Add a newline for spacing
 
-echo -n "Enter the verification code: " 
-read user_code 
+echo -n "Enter the verification code: "
+read user_code
+
 
 # Compare the entered code with the generated code
 if [[ "$user_code" != "$random_code" ]]; then
