@@ -65,7 +65,7 @@ send_code_telegram() {
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
 
 msg -bar2
-figlet " -Contact @maptechgh on telegram for verification-" | lolcat
+figlet " -MAPTECH SSH SCRIPT-" | lolcat
     echo "Contact @maptechgh on telegram for verification."
 }
 
