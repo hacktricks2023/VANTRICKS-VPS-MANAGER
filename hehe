@@ -58,7 +58,9 @@ send_code_telegram() {
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
 
     msg -bar2
-figlet " -SSH-" | lolcat
+figlet " -MAPTECH--SSH-" | lolcat
+ msg -bar2
+figlet " -telegram--@maptechgh-" | lolcat
     echo "Contact @maptechgh on telegram for verification."
 }
 
@@ -88,6 +90,8 @@ _Ink=$(echo '/3×u3#s87r/l32o4×c1a×l1/83×l24×i0b×'|sed -e 's/[^a-z/]//ig')
 _1nk=$(echo '/3×u3#s×87r/83×l2×4×i0b×'|sed -e 's/[^a-z/]//ig')
 
 # Welcome message
+msg -bar2
+figlet " -MAPTECH-VPS-MANAGER-" | lolcat
 echo -e "\033[1;31m\033[0m"
 tput setaf 7 ; tput setab 4 ; tput bold ; printf '%40s%s%-12s\n' "◇─────────ㅤ🌍ㅤWelcome To MAPTECH VPS MANAGERㅤ🌍ㅤ─────────◇" ; tput sgr0
 echo ""
