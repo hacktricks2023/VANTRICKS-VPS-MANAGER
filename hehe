@@ -1,4 +1,11 @@
 #!/bin/bash
+# ANSI color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
 
 # Function to display a progress bar
 fun_bar() {
@@ -57,10 +64,6 @@ send_code_telegram() {
     # Send message to Telegram
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
 
-    msg -bar2
-figlet " -MAPTECH--SSH-" | lolcat
- msg -bar2
-figlet " -telegram--@maptechgh-" | lolcat
     echo "Contact @maptechgh on telegram for verification."
 }
 
