@@ -1,12 +1,5 @@
 #!/bin/bash
 IP=$(cat /etc/IP)
-
-if [[ -f /etc/.domain ]]; then 
-   Host=$(cat /etc/.domain)
-else
-   Host="Your_domain_here"
-fi
-
 if [ ! -d /etc/VPSManager/userteste ]; then
 mkdir /etc/VPSManager/userteste
 fi
@@ -75,7 +68,6 @@ clear
     echo -e "\033[1;37m◈────────────⪧ SSH ACCOUNT ⪦────────────◈"
     echo ""
     echo -e "\033[1;32m◈ Public IP   :⪧  \033[1;31m$IP"
-    echo -e "\033[1;32m◈ Domain      :⪧  \033[1;31m$Host"
     echo -e "\033[1;32m◈ Username    :⪧  \033[1;31m$nome"
     echo -e "\033[1;32m◈ Password    :⪧  \033[1;31m$pass"
     echo -e "\033[1;32m◈ Login Limit :⪧  \033[1;31m$limit"
@@ -83,11 +75,11 @@ clear
     echo ""
     echo -e "\033[1;37m◈──────⪧ MTN GHANA PAYLOAD 1️⃣ ⪦ ───────◈"
     echo ""
-    echo -e "\033[1;32mGET / HTTP/1.1[crlf]Host:$Host [crlf]Connection: Upgrade[crlf]User-Agent: [ua][crlf]Upgrade: websocket[crlf][crlf]"
+    echo -e "\033[1;32mGET / HTTP/1.1[crlf]Host: Your_Domain [crlf]Connection: Upgrade[crlf]User-Agent: [ua][crlf]Upgrade: websocket[crlf][crlf]"
     echo ""
     echo -e "\033[1;37m◈──────⪧ MTN GHANA PAYLOAD 2️⃣ ⪦ ───────◈"
     echo ""
-    echo -e "\033[1;32mGET ws://[rotate=auth.mtn.com.gh;uhas.edu.gh] HTTP/1.1[crlf]Host: auth.ayo4u.com[crlf]Upgrade: websocket[crlf][crlf]-_- ws:// $Host HTTP/1.1[crlf]Host: auth.ayo4u.com[crlf]Upgrade: websocket[crlf][crlf]"
+    echo -e "\033[1;32mGET ws://[rotate=auth.mtn.com.gh;uhas.edu.gh] HTTP/1.1[crlf]Host: auth.ayo4u.com[crlf]Upgrade: websocket[crlf][crlf]-_- ws:// Your_Domain HTTP/1.1[crlf]Host: auth.ayo4u.com[crlf]Upgrade: websocket[crlf][crlf]"
     echo ""
     echo -e "\033[1;37m◈──────⪧ TELECEL GHANA PAYLOAD ⪦ ───────◈"
     echo ""
