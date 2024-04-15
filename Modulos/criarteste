@@ -3,9 +3,9 @@ IP=$(cat /etc/IP)
 if [ ! -d /etc/VPSManager/userteste ]; then
 mkdir /etc/VPSManager/userteste
 fi
-tput setaf 7 ; tput setab 4 ; tput bold ; printf '%30s%s%-15s\n' "Create UDP user" ; tput sgr0
+tput setaf 7 ; tput setab 4 ; tput bold ; printf '%30s%s%-15s\n' "Create test user" ; tput sgr0
 echo ""
-[ "$(ls -A /etc/VPSManager/userteste)" ] && echo -e "\033[1;32mList of UDP Users!\033[1;37m" || echo -e "\033[1;31mNo active tests!\033[0m"
+[ "$(ls -A /etc/VPSManager/userteste)" ] && echo -e "\033[1;32mActive Test User!\033[1;37m" || echo -e "\033[1;31mNo active tests!\033[0m"
 echo ""
 for testeson in $(ls /etc/VPSManager/userteste |sort |sed 's/.sh//g')
 do
@@ -68,17 +68,17 @@ clear
     echo -e "\033[1;37m◈─────⪧ UDP-REQUEST ACCOUNT ⪦─────◈"
     echo ""
     echo -e "\033[1;32m◈ Server IP   :⪧  \033[1;31m$IP"
-    echo -e "\033[1;32m◈ Username    :⪧  \033[1;31m$username"
-    echo -e "\033[1;32m◈ Password    :⪧  \033[1;31m$password"
-    echo -e "\033[1;32m◈ Start Port  :⪧  \033[1;31m1"
-    echo -e "\033[1;32m◈ End Port    :⪧  \033[1;31m65535"
-    echo -e "\033[1;32m◈ Login Limit :⪧  \033[1;31m$sshlimiter"
-    echo -e "\033[1;32m◈ Expire Date :⪧  \033[1;31m$gui"
+    echo -e "\033[1;32m◈ Username    :⪧  \033[1;31m$nome"
+    echo -e "\033[1;32m◈ Password    :⪧  \033[1;31m$pass"
+    echo -e "\033[1;32m◈ Start Port  :⪧  \033[1;31m 1"
+    echo -e "\033[1;32m◈ End Port    :⪧  \033[1;31m 65535"
+    echo -e "\033[1;32m◈ Login Limit :⪧  \033[1;31m$limit"
+    echo -e "\033[1;32m◈ Expire Date :⪧  \033[1;31m$u_temp minutes"
     echo ""
     echo -e "\033[1;37m◈─────────────────────────────────◈"
     echo -e "\033[1;37m©️ 🌍 MAPTECH VPS MANAGER SCRIPT 🌍 "
     echo -e "\033[1;37m◈─────────────────────────────────◈"
     echo ""
-    echo -e "\033[1;33mAfter the defined time of the user \033[1;32m$username"
+    echo -e "\033[1;33mAfter the defined time of the user \033[1;32m$nome"
     echo -e "\033[1;33mwill be disconnected and deleted.\033[0m"
 exit
