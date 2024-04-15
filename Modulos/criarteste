@@ -17,20 +17,20 @@ if [[ -z $nome ]]
 then
 echo ""
 tput setaf 7 ; tput setab 1 ; tput bold ; echo "" ; echo "Empty or invalid name." ; echo "" ; tput sgr0
-  exit 1
+	exit 1
 fi
 awk -F : ' { print $1 }' /etc/passwd > /tmp/users 
 if grep -Fxq "$nome" /tmp/users
 then
-  tput setaf 7 ; tput setab 1 ; tput bold ; echo "" ; echo "This user already exists." ; echo "" ; tput sgr0
-  exit 1
+	tput setaf 7 ; tput setab 1 ; tput bold ; echo "" ; echo "This user already exists." ; echo "" ; tput sgr0
+	exit 1
 fi
 echo -ne "\033[1;32mPassword\033[1;37m: "; read pass
 if [[ -z $pass ]]
 then
 echo ""
 tput setaf 7 ; tput setab 1 ; tput bold ; echo "" ; echo "Empty or invalid password." ; echo "" ; tput sgr0
-  exit 1
+	exit 1
 fi
 echo -ne "\033[1;32mLimit\033[1;37m: "; read limit
 if [[ -z $limit ]]
@@ -38,14 +38,14 @@ then
 echo ""
 tput setaf 7 ; tput setab 1 ; tput bold ; echo "" ; echo "Empty or invalid limit.
 " ; echo "" ; tput sgr0
-  exit 1
+	exit 1
 fi
 echo -ne "\033[1;32mminutes \033[1;33m(\033[1;31mEx: \033[1;37m60\033[1;33m)\033[1;37m: "; read u_temp
 if [[ -z $limit ]]
 then
 echo ""
 tput setaf 7 ; tput setab 1 ; tput bold ; echo "" ; echo "Empty or invalid limit." ; echo "" ; tput sgr0
-  exit 1
+	exit 1
 fi
 useradd -M -s /bin/false $nome
 (echo $pass;echo $pass) |passwd $nome > /dev/null 2>&1
@@ -61,23 +61,34 @@ exit" > /etc/VPSManager/userteste/$nome.sh
 chmod +x /etc/VPSManager/userteste/$nome.sh
 at -f /etc/VPSManager/userteste/$nome.sh now + $u_temp min > /dev/null 2>&1
 clear
-    echo -e "\033[1;32m===================================="
-    echo -e "\033[1;32m   🌍ㅤMAPTECH VPS MANAGERㅤ🌍  " 
-    echo -e "\033[1;32m===================================="
+    echo -e "\033[1;32m==========================================="
+    echo -e "\033[1;32m       🌍ㅤMAPTECH VPS MANAGERㅤ🌍        " 
+    echo -e "\033[1;32m==========================================="
     echo ""
-    echo -e "\033[1;37m◈─────⪧ UDP-REQUEST ACCOUNT ⪦─────◈"
+    echo -e "\033[1;37m◈────────────⪧ SSH ACCOUNT ⪦────────────◈"
     echo ""
-    echo -e "\033[1;32m◈ Server IP   :⪧  \033[1;31m$IP"
+    echo -e "\033[1;32m◈ Public IP   :⪧  \033[1;31m$IP"
+    echo -e "\033[1;32m◈ Domain      :⪧  \033[1;31m$Host"
     echo -e "\033[1;32m◈ Username    :⪧  \033[1;31m$nome"
     echo -e "\033[1;32m◈ Password    :⪧  \033[1;31m$pass"
-    echo -e "\033[1;32m◈ Start Port  :⪧  \033[1;31m 1"
-    echo -e "\033[1;32m◈ End Port    :⪧  \033[1;31m 65535"
     echo -e "\033[1;32m◈ Login Limit :⪧  \033[1;31m$limit"
     echo -e "\033[1;32m◈ Expire Date :⪧  \033[1;31m$u_temp minutes"
     echo ""
-    echo -e "\033[1;37m◈─────────────────────────────────◈"
-    echo -e "\033[1;37m©️ 🌍 MAPTECH VPS MANAGER SCRIPT 🌍 "
-    echo -e "\033[1;37m◈─────────────────────────────────◈"
+    echo -e "\033[1;37m◈──────⪧ MTN GHANA PAYLOAD 1️⃣ ⪦ ───────◈"
+    echo ""
+    echo -e "\033[1;32mGET / HTTP/1.1[crlf]Host:$Host [crlf]Connection: Upgrade[crlf]User-Agent: [ua][crlf]Upgrade: websocket[crlf][crlf]"
+    echo ""
+    echo -e "\033[1;37m◈──────⪧ MTN GHANA PAYLOAD 2️⃣ ⪦ ───────◈"
+    echo ""
+    echo -e "\033[1;32mGET ws://[rotate=auth.mtn.com.gh;uhas.edu.gh] HTTP/1.1[crlf]Host: auth.ayo4u.com[crlf]Upgrade: websocket[crlf][crlf]-_- ws:// $Host HTTP/1.1[crlf]Host: auth.ayo4u.com[crlf]Upgrade: websocket[crlf][crlf]"
+    echo ""
+    echo -e "\033[1;37m◈──────⪧ TELECEL GHANA PAYLOAD ⪦ ───────◈"
+    echo ""
+    echo -e "\033[1;32mGET http://91.241.94.160/ HTTP/1.1[crlf]Host: zerod.mobi[crlf]Connection: Upgrade[crlf]Upgrade: Websocket [crlf][crlf]"
+    echo ""
+    echo -e "\033[1;37m◈────────────────────────────────────────◈"
+    echo -e "\033[1;37m©️     🌍 MAPTECH VPS MANAGER SCRIPT 🌍    "
+    echo -e "\033[1;37m◈────────────────────────────────────────◈"
     echo ""
     echo -e "\033[1;33mAfter the defined time of the user \033[1;32m$nome"
     echo -e "\033[1;33mwill be disconnected and deleted.\033[0m"
