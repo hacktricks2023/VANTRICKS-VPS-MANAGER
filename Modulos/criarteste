@@ -1,5 +1,12 @@
 #!/bin/bash
 IP=$(cat /etc/IP)
+
+if [[ -f /etc/.domain ]]; then 
+   Host=$(cat /etc/.domain)
+else
+   Host="Your_domain_here"
+fi
+
 if [ ! -d /etc/VPSManager/userteste ]; then
 mkdir /etc/VPSManager/userteste
 fi
