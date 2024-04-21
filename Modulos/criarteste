@@ -62,7 +62,7 @@ chmod +x /etc/VPSManager/userteste/$nome.sh
 at -f /etc/VPSManager/userteste/$nome.sh now + $u_temp min > /dev/null 2>&1
 clear
     echo -e "\033[1;32m==========================================="
-    echo -e "\033[1;32m       🌍ㅤMAPTECH VPS MANAGERㅤ🌍        " 
+    echo -e "\033[1;32m     🌍ㅤVANTRICKS VPS MANAGERㅤ🌍        " 
     echo -e "\033[1;32m==========================================="
     echo ""
     echo -e "\033[1;37m◈────────────⪧ SSH ACCOUNT ⪦────────────◈"
@@ -86,7 +86,7 @@ clear
     echo -e "\033[1;32mGET http://91.241.94.160/ HTTP/1.1[crlf]Host: zerod.mobi[crlf]Connection: Upgrade[crlf]Upgrade: Websocket [crlf][crlf]"
     echo ""
     echo -e "\033[1;37m◈────────────────────────────────────────◈"
-    echo -e "\033[1;37m©️     🌍 MAPTECH VPS MANAGER SCRIPT 🌍    "
+    echo -e "\033[1;37m©️   🌍 VANTRICKS VPS MANAGER SCRIPT 🌍    "
     echo -e "\033[1;37m◈────────────────────────────────────────◈"
     echo ""
     echo -e "\033[1;33mAfter the defined time of the user \033[1;32m$nome"
