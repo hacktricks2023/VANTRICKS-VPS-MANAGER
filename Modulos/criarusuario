@@ -346,7 +346,7 @@ echo "$username $sshlimiter" >>/root/usuarios.db
 		}
 		clear
     echo -e "\033[1;32m==========================================="
-    echo -e "\033[1;32m       🌍ㅤMAPTECH VPS MANAGERㅤ🌍        " 
+    echo -e "\033[1;32m       🌍ㅤVANTRICKS VPS MANAGERㅤ🌍        " 
     echo -e "\033[1;32m==========================================="
     echo ""
     echo -e "\033[1;37m◈────────────⪧ SSH ACCOUNT ⪦────────────◈"
@@ -371,7 +371,7 @@ echo "$username $sshlimiter" >>/root/usuarios.db
     echo -e "\033[1;32mGET http://91.241.94.160/ HTTP/1.1[crlf]Host: zerod.mobi[crlf]Connection: Upgrade[crlf]Upgrade: Websocket [crlf][crlf]"
     echo ""
     echo -e "\033[1;37m◈────────────────────────────────────────◈"
-    echo -e "\033[1;37m©️     🌍 MAPTECH VPS MANAGER SCRIPT 🌍    "
+    echo -e "\033[1;37m©️     🌍 VANTRICKS VPS MANAGER SCRIPT 🌍    "
     echo -e "\033[1;37m◈────────────────────────────────────────◈"
 		sleep 1
 		function aguarde() {
@@ -408,7 +408,7 @@ echo "$username $sshlimiter" >>/root/usuarios.db
 	} || {
 		clear
     echo -e "\033[1;32m==========================================="
-    echo -e "\033[1;32m       🌍ㅤMAPTECH VPS MANAGERㅤ🌍        " 
+    echo -e "\033[1;32m       🌍ㅤVANTRICKS VPS MANAGERㅤ🌍        " 
     echo -e "\033[1;32m==========================================="
     echo ""
     echo -e "\033[1;37m◈────────────⪧ SSH ACCOUNT ⪦────────────◈"
@@ -433,13 +433,13 @@ echo "$username $sshlimiter" >>/root/usuarios.db
     echo -e "\033[1;32mGET http://91.241.94.160/ HTTP/1.1[crlf]Host: zerod.mobi[crlf]Connection: Upgrade[crlf]Upgrade: Websocket [crlf][crlf]"
     echo ""
     echo -e "\033[1;37m◈────────────────────────────────────────◈"
-    echo -e "\033[1;37m©️     🌍 MAPTECH VPS MANAGER SCRIPT 🌍    "
+    echo -e "\033[1;37m©️   🌍 VANTRICKS VPS MANAGER SCRIPT 🌍    "
     echo -e "\033[1;37m◈────────────────────────────────────────◈"
 	}
 } || {
 	clear
     echo -e "\033[1;32m==========================================="
-    echo -e "\033[1;32m       🌍ㅤMAPTECH VPS MANAGERㅤ🌍        " 
+    echo -e "\033[1;32m     🌍ㅤVANTRICKS VPS MANAGERㅤ🌍        " 
     echo -e "\033[1;32m==========================================="
     echo ""
     echo -e "\033[1;37m◈────────────⪧ SSH ACCOUNT ⪦────────────◈"
@@ -464,6 +464,6 @@ echo "$username $sshlimiter" >>/root/usuarios.db
     echo -e "\033[1;32mGET http://91.241.94.160/ HTTP/1.1[crlf]Host: zerod.mobi[crlf]Connection: Upgrade[crlf]Upgrade: Websocket [crlf][crlf]"
     echo ""
     echo -e "\033[1;37m◈────────────────────────────────────────◈"
-    echo -e "\033[1;37m©️     🌍 MAPTECH VPS MANAGER SCRIPT 🌍    "
+    echo -e "\033[1;37m©️   🌍 VANTRICKS VPS MANAGER SCRIPT 🌍    "
     echo -e "\033[1;37m◈────────────────────────────────────────◈"
 }
