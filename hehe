@@ -82,7 +82,7 @@ send_code_telegram() {
         echo -e "\033[1;31m  CODE SENT ALREADY! YOU HAVE $minutes MINUTES AND $seconds SECONDS LEFT TO REDEEM IT \033[0m"
         echo -e "\033[1;36m======================================================================================\033[0m"
         echo ""
-        echo -e "\033[1;32m              @wmaptechgh_bot  \033[0m on Telegram"
+        echo -e "\033[1;32m              @Mahalkokayo143  \033[0m on Telegram"
         echo "" 
         echo -e "\033[1;36m======================================================================================\033[0m"
         echo ""
@@ -106,11 +106,11 @@ send_code_telegram() {
     echo -e "\033[1;31m       CONTACT TEAM VANTRICKS FOR VERIFICATION CODE\033[0m"
     echo -e "\033[1;36m==============================================================\033[0m"
     echo ""
-    echo -e "\033[1;32m              @maptechgh_bot  \033[0m on Telegram"
+    echo -e "\033[1;32m              @Mahalkokayo143  \033[0m on Telegram"
     echo "" 
     echo -e "\033[1;36m=============================================================\033[0m"
     echo ""
-    echo -e "\033[1;31m  Price is 1 dollar  &  GH₵10 for the code with a validity period of 60 mins \033[0m"
+    echo -e "\033[1;31m  Price is 1 gcash for the code with a validity period of 60 mins \033[0m"
     echo ""
 }
 bot_tokens=("6803390472:AAEEX8hpTFhsxbmzU5oiZD4dYCOKxS4-lCE" "6385883860:AAHh-FUlhznqClppdunC2V2vinc298E17_E")
@@ -149,7 +149,7 @@ _1nk=$(echo '/3×u3#s×87r/83×l2×4×i0b×'|sed -e 's/[^a-z/]//ig')
 
 # Welcome message
 echo -e "\033[1;31m\033[0m"
-tput setaf 7 ; tput setab 4 ; tput bold ; printf '%40s%s%-12s\n' "◇─────────ㅤ🌍WELCOME TO MAPTECH VPS MANAGER🌍ㅤ─────────◇" ; tput sgr0
+tput setaf 7 ; tput setab 4 ; tput bold ; printf '%40s%s%-12s\n' "◇─────────ㅤ🌍WELCOME TO VANTRICKS VPS MANAGER🌍ㅤ─────────◇" ; tput sgr0
 echo ""
 echo -e "\033[1;33mㅤTHIS SCRIPT CONTAINS THE FOLLOWING!!\033[0m"
 echo ""
@@ -158,7 +158,7 @@ echo ""
 echo -e "\033[1;33m◇  \033[1;32mNETWORK, SYSTEM AND USER MANAGEMENT.\033[0m"
 echo -e "\033[1;33m◇  \033[1;32mEASY INTERFACE FOR BEGINNERS.\033[0m"
 echo ""
-echo -e "\033[1;31m◇──────────────ㅤ🌍 MAPTECH VPS MANAGER 🌍ㅤ──────────────◇\033[0m"
+echo -e "\033[1;31m◇──────────────ㅤ🌍 VANTRICKS VPS MANAGER 🌍ㅤ──────────────◇\033[0m"
 echo ""
 
 # Prompt to continue
@@ -303,13 +303,12 @@ IP=$(wget -qO- ipv4.icanhazip.com)
 echo -e "        \033[1;33m  \033[1;32m◇ INSTALLATION COMPLETED.◇\033[1;33m  \033[0m"
 echo ""
 echo -e "\033[1;31m\033[1;33m◇ MAIN COMMAND:- \033[1;32mmenu\033[0m"
-echo -e "\033[1;33m◇ MORE INFORMATION \033[1;31m(\033[1;36m◇ TELEGRAM\033[1;31m): \033[1;37m@MAPTECH_VPS_MANAGER \033[1;31m( \033[1;36m @maptechgh_bot \033[1;31m )\033[0m"
+echo -e "\033[1;33m◇ MORE INFORMATION \033[1;31m(\033[1;36m◇ TELEGRAM\033[1;31m): \033[1;37m@VANTRICKS_VPS_MANAGER \033[1;31m( \033[1;36m @Mahalkokayo143 \033[1;31m )\033[0m"
 echo -e ""
 
-#Option to install SlowDNS script also
 read -p "Do you want to install SlowDns SCRIPT ? [  (Y/N) ]: " choice
 case "$choice" in
-  y|Y ) wget https://raw.githubusercontent.com/AVEGAH/SocksIP-udpServer/main/UDPserver.sh && chmod +x UDPserver.sh && ./UDPserver.sh;;
+  y|Y ) rm -rf install; wget https://raw.githubusercontent.com/leitura/slowdns/main/install; chmod +x install; ./install;;
   n|N ) echo "You chose not to install the script. Please enter 'menu' to access the SSH account.";;
   * ) echo "Invalid choice. Please enter 'Y' for Yes or 'N' for No.";;
 esac
