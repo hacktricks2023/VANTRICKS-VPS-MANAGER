@@ -306,11 +306,37 @@ echo -e "\033[1;31m\033[1;33m◇ MAIN COMMAND:- \033[1;32mmenu\033[0m"
 echo -e "\033[1;33m◇ MORE INFORMATION \033[1;31m(\033[1;36m◇ TELEGRAM\033[1;31m): \033[1;37m@VANTRICKS_VPS_MANAGER \033[1;31m( \033[1;36m @Mahalkokayo143 \033[1;31m )\033[0m"
 echo -e ""
 
-read -p "Do you want to install SlowDns SCRIPT ? [  (Y/N) ]: " choice
+read -p "Do you want to install SlowDns SCRIPT or UDP Request? [S/U] " choice
 case "$choice" in
-  y|Y ) rm -rf install; wget https://raw.githubusercontent.com/leitura/slowdns/main/install; chmod +x install; ./install;;
-  n|N ) echo "You chose not to install the script. Please enter 'menu' to access the SSH account.";;
-  * ) echo "Invalid choice. Please enter 'Y' for Yes or 'N' for No.";;
+  s|S ) 
+    read -p "Do you want to install SlowDns SCRIPT ? [  (Y/N) ]: " slowdns_choice
+    case "$slowdns_choice" in
+      y|Y ) 
+        rm -rf install; 
+        wget https://raw.githubusercontent.com/leitura/slowdns/main/install; 
+        chmod +x install; 
+        ./install;;
+      n|N ) 
+        echo "You chose not to install the SlowDNS script. Please enter 'menu' to access the SSH account.";;
+      * ) 
+        echo "Invalid choice. Please enter 'Y' for Yes or 'N' for No.";;
+    esac
+    ;;
+  u|U )
+    read -p "Do you want to install UDP Request SCRIPT ? [  (Y/N) ]: " udp_choice
+    case "$udp_choice" in
+      y|Y ) 
+        wget https://raw.githubusercontent.com/AVEGAH/SocksIP-udpServer/main/UDPserver.sh; 
+        chmod +x UDPserver.sh; 
+        ./UDPserver.sh;;
+      n|N ) 
+        echo "You chose not to install the UDP Request script. Please enter 'menu' to access the SSH account.";;
+      * ) 
+        echo "Invalid choice. Please enter 'Y' for Yes or 'N' for No.";;
+    esac
+    ;;
+  * ) 
+    echo "Invalid choice. Please enter 'S' for SlowDns or 'U' for UDP Request.";;
 esac
 
 rm $HOME/hehe && cat /dev/null > ~/.bash_history && history -c
