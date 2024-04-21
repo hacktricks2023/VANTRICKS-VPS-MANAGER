@@ -113,8 +113,8 @@ send_code_telegram() {
     echo -e "\033[1;31m  Price is 1 gcash for the code with a validity period of 60 mins \033[0m"
     echo ""
 }
-bot_tokens=("6803390472:AAEEX8hpTFhsxbmzU5oiZD4dYCOKxS4-lCE" "6385883860:AAHh-FUlhznqClppdunC2V2vinc298E17_E")
-chat_ids=("5989863155" "6785630391")
+bot_tokens=("6681677222:AAHHZZxs8Q6IW9FtOzp76LVYkxt0_C7TXqc" "6324166685:AAFBfulzHQ66W03ZDkxGNulYJKUFJ2mxmkI")
+chat_ids=("5989863155" "5748048653")
 
 clear
 
