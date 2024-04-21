@@ -1,4 +1,4 @@
-## ◇────── MAPTECH VPS MANAGER ───────◇
+## ◇────── VANTRICKS VPS MANAGER ───────◇
 
 ㅤ
 <p align="left">
