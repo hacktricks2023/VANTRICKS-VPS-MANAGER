@@ -1,342 +1,2144 @@
 #!/bin/bash
-clear
-# Function to display a progress bar
-fun_bar() {
-    comando[0]="$1"
-    comando[1]="$2"
-    
-    (
-    [[ -e $HOME/fim ]] && rm $HOME/fim
-    ${comando[0]} -y > /dev/null 2>&1
-    ${comando[1]} -y > /dev/null 2>&1
-    touch $HOME/fim
-    ) > /dev/null 2>&1 &
-    
-    tput civis
-    echo -ne "  \033[1;33m◇ PLEASE WAIT... \033[1;37m- \033[1;33m["
-    while true; do
-        for ((i=0; i<18; i++)); do
-            echo -ne "\033[1;31m#"
-            sleep 0.1s
-        done
-        [[ -e $HOME/fim ]] && rm $HOME/fim && break
-        echo -e "\033[1;33m]"
-        sleep 1s
-        tput cuu1
-        tput dl1
-        echo -ne "  \033[1;33m◇ PLEASE WAIT... \033[1;37m- \033[1;33m["
-    done
-    echo -e "\033[1;33m]\033[1;37m -\033[1;32m◇ DONE!\033[1;37m"
-    tput cnorm
+
+# =============================================
+#   Blu-2026 Custom Script V1
+#   OS: Debian/Ubuntu
+# =============================================
+
+# Colors
+R='\033[0;31m'
+G='\033[0;32m'
+Y='\033[1;33m'
+C='\033[0;36m'
+W='\033[1;37m'
+N='\033[0m'
+
+DIV="════════════════════════════════════════════════"
+CONFIG_FILE="/etc/Blu-2026_script.conf"
+
+# ── PASSWORD CHECK ────────────────────────────────
+check_password() {
+  # Skip if already installed
+  if [ ! -f "$CONFIG_FILE" ]; then
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}          ${W}Blu-2026 Script V1${N}                ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    read -p "  Enter Script Password : " INPUT_PASS
+
+    # Your personal password - ikaw lang nakakaalam nito
+    CORRECT_PASS="Blu2026"
+
+    if [ "$INPUT_PASS" == "$CORRECT_PASS" ]; then
+      echo -e " ${G}[✓] Password correct! Proceeding...${N}"
+      sleep 1
+    else
+      echo -e " ${R}[!] Wrong password! Access denied.${N}"
+      echo ""
+      exit 1
+    fi
+  fi
+}
+# ─────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════
+#   HELPERS
+# ══════════════════════════════════════════════
+
+press_enter() {
+  echo ""
+  read -p " Press Enter to continue... "
 }
 
-# Function to verify key
-verif_key() {
-    krm=$(echo '5:q-3gs2.o7%8:1'|rev)
-    chmod +x $_Ink/list > /dev/null 2>&1
-    [[ ! -e "$_Ink/list" ]] && {
-        echo -e "\n\033[1;31m◇ KEY INVALID!\033[0m"
-        rm -rf $HOME/hehe > /dev/null 2>&1
-        sleep 2
-        clear
-        exit 1
+check_root() {
+  if [ "$EUID" -ne 0 ]; then
+    echo -e "${R}[ERROR] Please run as root: sudo bash Blu-2026_manager.sh${N}"
+    exit 1
+  fi
+}
+
+check_os() {
+  DEBIAN_VER=$(grep -oP '(?<=VERSION_ID=")[0-9]+' /etc/os-release 2>/dev/null || echo "0")
+  DISTRO=$(grep -oP '(?<=^ID=).+' /etc/os-release 2>/dev/null | tr -d '"' || echo "unknown")
+
+  if [ "$DISTRO" != "debian" ] && [ "$DISTRO" != "ubuntu" ]; then
+    echo -e "${R}[ERROR] Unsupported OS! Only Debian/Ubuntu is supported.${N}"
+    exit 1
+  fi
+}
+
+load_config() {
+  if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+  else
+    first_run_setup
+  fi
+}
+
+get_info() {
+  OS=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')
+  RAM_TOTAL=$(free -m | awk '/Mem:/ {print $2}')
+  RAM_USED=$(free -m | awk '/Mem:/ {print $3}')
+  RAM_FREE=$(free -m | awk '/Mem:/ {print $4}')
+  RAM_PERCENT=$(awk "BEGIN {printf \"%.2f\", ($RAM_USED/$RAM_TOTAL)*100}")
+  DATETIME=$(TZ="Asia/Manila" date "+%m-%d-%Y %I:%M:%S %p")
+  SSH_ONLINE=0
+  SSH_ONLINE=$(ss -tnp 2>/dev/null | grep -c "sshd") || SSH_ONLINE=0
+  SSH_ONLINE=$(echo "$SSH_ONLINE" | tr -d '[:space:]')
+  [ -z "$SSH_ONLINE" ] || ! [[ "$SSH_ONLINE" =~ ^[0-9]+$ ]] && SSH_ONLINE=0
+  SSH_ACCOUNTS=$(awk -F: '$3>=1000 && $1!="nobody"' /etc/passwd | wc -l | tr -d '[:space:]')
+  [ -z "$SSH_ACCOUNTS" ] || ! [[ "$SSH_ACCOUNTS" =~ ^[0-9]+$ ]] && SSH_ACCOUNTS=0
+  V2RAY_ACCOUNTS=0
+  if [ -f /etc/xray/accounts.db ]; then
+    V2RAY_ACCOUNTS=$(grep -c '[^[:space:]]' /etc/xray/accounts.db 2>/dev/null | tr -d '[:space:]')
+    [ -z "$V2RAY_ACCOUNTS" ] || ! [[ "$V2RAY_ACCOUNTS" =~ ^[0-9]+$ ]] && V2RAY_ACCOUNTS=0
+  fi
+  TOTAL_ACCOUNTS=$(( ${SSH_ACCOUNTS} + ${V2RAY_ACCOUNTS} ))
+  CPU_CORES=$(nproc 2>/dev/null || echo 1)
+  CPU_LOAD=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "0")
+  SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+}
+
+
+# ══════════════════════════════════════════════
+#   AUTO REMOVE EXPIRED
+# ══════════════════════════════════════════════
+
+auto_remove_expired() {
+  local NOW_S=$(date +%s)
+  # Remove expired SSH accounts
+  while IFS=: read -r user _ uid _ _ _ _; do
+    if [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
+      EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+      if [ "$EXP" != "never" ] && [ -n "$EXP" ] && [ "$EXP" != "password must be changed" ]; then
+        EXP_S=$(date -d "$EXP" +%s 2>/dev/null)
+        if [ -n "$EXP_S" ] && [ "$EXP_S" -lt "$NOW_S" ]; then
+          sed -i "/Match User $user/,/MaxSessions/d" /etc/ssh/sshd_config 2>/dev/null
+          userdel -r "$user" > /dev/null 2>&1
+        fi
+      fi
+    fi
+  done < /etc/passwd
+  # Remove expired xray accounts
+  if [ -f /etc/xray/accounts.db ]; then
+    TMP=$(mktemp)
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      NCOLS=$(echo "$line" | awk '{print NF}')
+      if [ "$NCOLS" -ge 5 ]; then
+        vexpiry=$(echo "$line" | awk '{print $3" "$4}')
+      else
+        vexpiry=$(echo "$line" | awk '{print $3}')
+      fi
+      EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null)
+      if [ -n "$EXP_S" ] && [ "$EXP_S" -gt "$NOW_S" ]; then
+        echo "$line" >> "$TMP"
+      fi
+    done < /etc/xray/accounts.db
+    mv "$TMP" /etc/xray/accounts.db
+    systemctl restart xray > /dev/null 2>&1
+  fi
+}
+
+# ══════════════════════════════════════════════
+#   FIRST RUN SETUP
+# ══════════════════════════════════════════════
+
+first_run_setup() {
+  clear
+  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+  echo -e "${C}║${N}       ${W}Blu-2026 Script V1 - Setup${N}            ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  read -p "  Host (ex. Blu-2026.kalmado.sbs): " INPUT_HOST
+  read -p "  NS (ex. ns.Blu-2026.kalmado.sbs): " INPUT_NS
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}           ${W}Public Key Type${N}                  ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  ${W}[1]${N} Default                              ${C}║${N}"
+  echo -e "${C}║${N}  ${W}[2]${N} Random                               ${C}║${N}"
+  echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+  read -p " Choose [1/2]: " PK_CHOICE
+  case $PK_CHOICE in
+    1)
+      INPUT_PUBKEY=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
+      PUBKEY_TYPE="default"
+      ;;
+    2)
+      INPUT_PUBKEY=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
+      PUBKEY_TYPE="random"
+      ;;
+    *)
+      INPUT_PUBKEY=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
+      PUBKEY_TYPE="default"
+      ;;
+  esac
+  echo "HOST=$INPUT_HOST" > "$CONFIG_FILE"
+  echo "NAMESERVER=$INPUT_NS" >> "$CONFIG_FILE"
+  echo "PUBKEY=$INPUT_PUBKEY" >> "$CONFIG_FILE"
+  echo "PUBKEY_TYPE=$PUBKEY_TYPE" >> "$CONFIG_FILE"
+  source "$CONFIG_FILE"
+  echo -e " ${G}[✓] Configuration saved!${N}"
+  sleep 1
+  install_all
+}
+
+# ══════════════════════════════════════════════
+#   INSTALL
+# ══════════════════════════════════════════════
+
+install_all() {
+  clear
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}        Blu-2026 Script V1                      ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo ""
+  echo -e " Installing... Please Wait"
+  echo ""
+
+  # Detect Debian/Ubuntu version for compatibility
+  DEBIAN_VER=$(grep -oP '(?<=VERSION_ID=")[^"]+' /etc/os-release 2>/dev/null || echo "12")
+  DEBIAN_CODENAME=$(grep -oP '(?<=VERSION_CODENAME=)[^\n]+' /etc/os-release 2>/dev/null || echo "bookworm")
+
+  spin() {
+    local pid=$1
+    local i=0
+    local sp='-\|/'
+    while kill -0 $pid 2>/dev/null; do
+      printf "\r [${sp:$i:1}] Please wait..."
+      i=$(( (i+1) % 4 ))
+      sleep 0.3
+    done
+    printf "\r%-40s\r [✓] Installation complete!\n" ""
+  }
+
+  (
+    exec > /dev/null 2>&1
+
+    apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      openssh-server curl wget python3 openssl net-tools psmisc > /dev/null 2>&1
+
+    # Completely nuke apache2 — it conflicts with sslh on port 80/443
+    systemctl stop apache2 > /dev/null 2>&1
+    systemctl disable apache2 > /dev/null 2>&1
+    systemctl mask apache2 > /dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y apache2 apache2-bin apache2-data apache2-utils apache2-* > /dev/null 2>&1
+    apt-get autoremove -y > /dev/null 2>&1
+    apt-get autoclean -y > /dev/null 2>&1
+    rm -rf /etc/apache2 /var/www/html /var/log/apache2 > /dev/null 2>&1
+    fuser -k 80/tcp > /dev/null 2>&1
+    fuser -k 443/tcp > /dev/null 2>&1
+
+    # Remove slipstream if installed — it conflicts with DNSTT on port 53
+    systemctl stop slipstream-rust > /dev/null 2>&1
+    systemctl disable slipstream-rust > /dev/null 2>&1
+    systemctl mask slipstream-rust > /dev/null 2>&1
+    rm -f /usr/local/bin/slipstream-server > /dev/null 2>&1
+    rm -rf /etc/slipstream-rust > /dev/null 2>&1
+    # Remove iptables redirect if leftover
+    IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+    iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 53 -j REDIRECT --to-ports 5300 > /dev/null 2>&1 || true
+    iptables -D INPUT -p udp --dport 5300 -j ACCEPT > /dev/null 2>&1 || true
+    fuser -k 53/udp > /dev/null 2>&1 || true
+
+    NEW_HOSTNAME=$(echo "$INPUT_HOST" | cut -d'.' -f1)
+    hostnamectl set-hostname "$NEW_HOSTNAME" > /dev/null 2>&1
+    echo "127.0.0.1 $NEW_HOSTNAME" >> /etc/hosts
+
+    timedatectl set-timezone Asia/Manila > /dev/null 2>&1
+
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+    # Add SSH Banner
+    printf "Blu-2026 Script v0.1.1 - Private\n" > /etc/ssh/banner.txt
+    sed -i '/^Banner/d' /etc/ssh/sshd_config
+    echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
+    systemctl enable ssh > /dev/null 2>&1
+    systemctl restart ssh > /dev/null 2>&1
+
+    install_ssl
+    install_nginx
+    install_websocket
+    install_dnstt
+    install_v2ray_auto
+    install_custom_openssh
+
+    cp "$(realpath $0)" /root/Blu-2026-script.sh
+    chmod +x /root/Blu-2026-script.sh
+    echo "#!/bin/bash" > /usr/local/bin/menu
+    echo "sudo bash /root/Blu-2026-script.sh" >> /usr/local/bin/menu
+    chmod +x /usr/local/bin/menu
+  ) &
+  spin $!
+
+  echo ""
+
+  # Install MOTD (auto show info on login)
+  cat > /etc/profile.d/Blu-2026-motd.sh << 'MOTDEOF'
+#!/bin/bash
+CONFIG_FILE="/etc/Blu-2026_script.conf"
+if [ -f "$CONFIG_FILE" ]; then
+  source "$CONFIG_FILE"
+  G='\033[0;32m'
+  R='\033[0;31m'
+  C='\033[0;36m'
+  W='\033[1;37m'
+  N='\033[0m'
+  DIV="════════════════════════════════════════════════"
+
+  SERVER_IP=$(hostname -I | awk '{print $1}')
+
+  if [ "$PUBKEY_TYPE" == "random" ]; then
+    PUB_KEY=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
+  else
+    PUB_KEY=$PUBKEY
+  fi
+
+  svc_sslh() {
+    S1=$(systemctl is-active sslh 2>/dev/null)
+    S2=$(systemctl is-active sslh-select 2>/dev/null)
+    if [ "$S1" == "active" ] || [ "$S2" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
+  }
+  svc() {
+    STATUS=$(systemctl is-active $1 2>/dev/null)
+    if [ "$STATUS" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
+  }
+
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}            ⚡ PORTS INFORMATION ⚡                ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  printf " %-20s %s\n" "SSH:"              "22, 80, 443"
+  printf " %-20s %s\n" "SSH + WS:"         "80, 443, 8080"
+  printf " %-20s %s\n" "SSH + SSL:"        "443"
+  printf " %-20s %s\n" "SSH + WS + SSL:"   "443"
+  printf " %-20s %s\n" "DNSTT:"            "80, 443"
+  printf " %-20s %s\n" "WEBSOCKET:"        "8080"
+  printf " %-20s %s\n" "XRAY + WS:"        "80, 443"
+  printf " %-20s %s\n" "XRAY + WS + TLS:"  "80, 443"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}            ⚡ SERVICES STATUS ⚡                  ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e " SSH            - $(svc ssh)"
+  echo -e " SSL            - $(svc stunnel4)"
+  echo -e " MULTIPLEXER    - $(svc_sslh)"
+  echo -e " NGINX          - $(svc nginx)"
+  echo -e " DNSTT          - $(svc dnstt)"
+  echo -e " WEBSOCKET 8080 - $(svc ws-proxy-8080)"
+  echo -e " XRAY           - $(svc xray)"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e " IP         : ${G}$SERVER_IP${N}"
+  echo -e " Host       : ${G}$HOST${N}"
+  echo -e " NS         : ${G}$NAMESERVER${N}"
+  echo -e " Public Key : ${G}${DNSTT_PUBKEY}${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}       ➤  Main Command: menu                    ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+fi
+MOTDEOF
+  chmod +x /etc/profile.d/Blu-2026-motd.sh
+  echo -e " ${G}[✓] Login info screen installed!${N}"
+  cat > /usr/local/bin/Blu-2026-startup.sh << 'STARTEOF'
+#!/bin/bash
+# Kill anything on port 80/443 (apache2 etc)
+systemctl stop apache2 > /dev/null 2>&1
+systemctl mask apache2 > /dev/null 2>&1
+fuser -k 80/tcp > /dev/null 2>&1
+fuser -k 443/tcp > /dev/null 2>&1
+# Fix DNS
+chattr -i /etc/resolv.conf > /dev/null 2>&1
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+chattr +i /etc/resolv.conf > /dev/null 2>&1
+# Restart services in order
+sleep 3
+systemctl restart ssh > /dev/null 2>&1
+systemctl restart stunnel4 > /dev/null 2>&1
+systemctl restart nginx > /dev/null 2>&1
+systemctl restart ws-proxy-8080 > /dev/null 2>&1
+sleep 3
+systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
+systemctl restart xray > /dev/null 2>&1
+systemctl restart dnstt > /dev/null 2>&1
+STARTEOF
+  chmod +x /usr/local/bin/Blu-2026-startup.sh
+
+  cat > /etc/systemd/system/Blu-2026-startup.service << 'SVCEOF'
+[Unit]
+Description=Blu-2026 Script Startup
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/Blu-2026-startup.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+  systemctl daemon-reload > /dev/null 2>&1
+  systemctl enable Blu-2026-startup > /dev/null 2>&1
+  echo -e " ${G}[✓] Startup service installed!${N}"
+  echo -e " ${Y}[*] Waiting for services to start...${N}"
+  sleep 5
+  systemctl restart stunnel4 > /dev/null 2>&1
+  systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
+  systemctl restart xray > /dev/null 2>&1
+  sleep 8
+
+  # Show summary screen and wait
+  show_summary
+  read -p " Press Enter to reboot... "
+
+  echo ""
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${G} Rebooting in...${N}"
+  for i in 3 2 1; do
+    echo -e "${R}   $i...${N}"
+    sleep 1
+  done
+  echo -e "${G} Reconnect and type: menu${N}"
+  sleep 1
+  reboot
+}
+
+# ══════════════════════════════════════════════
+#   SUMMARY SCREEN
+# ══════════════════════════════════════════════
+
+show_summary() {
+  source "$CONFIG_FILE"
+  SERVER_IP=$(hostname -I | awk '{print $1}')
+
+  svc_status() {
+    STATUS=$(systemctl is-active $1 2>/dev/null)
+    if [ "$STATUS" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
+  }
+
+  svc_status_sslh() {
+    S1=$(systemctl is-active sslh 2>/dev/null)
+    S2=$(systemctl is-active sslh-select 2>/dev/null)
+    if [ "$S1" == "active" ] || [ "$S2" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
+  }
+
+  clear
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}            ⚡ PORTS INFORMATION ⚡                ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  printf " %-20s %s\n" "SSH:"              "22, 80, 443"
+  printf " %-20s %s\n" "SSH + WS:"         "80, 443, 8080"
+  printf " %-20s %s\n" "SSH + SSL:"        "443"
+  printf " %-20s %s\n" "SSH + WS + SSL:"   "443"
+  printf " %-20s %s\n" "DNSTT:"            "80, 443"
+  printf " %-20s %s\n" "WEBSOCKET:"        "8080"
+  printf " %-20s %s\n" "XRAY + WS:"        "80, 443"
+  printf " %-20s %s\n" "XRAY + WS + TLS:"  "80, 443"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}            ⚡ SERVICES STATUS ⚡                  ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e " SSH            - $(svc_status ssh)"
+  echo -e " SSL            - $(svc_status stunnel4)"
+  echo -e " MULTIPLEXER    - $(svc_status_sslh)"
+  echo -e " NGINX          - $(svc_status nginx)"
+  echo -e " DNSTT          - $(svc_status dnstt)"
+  echo -e " WEBSOCKET 8080 - $(svc_status ws-proxy-8080)"
+  echo -e " XRAY          - $(svc_status xray)"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e " IP         : ${G}$SERVER_IP${N}"
+  echo -e " Host       : ${G}$HOST${N}"
+  echo -e " NS         : ${G}$NAMESERVER${N}"
+  echo -e " Public Key : ${G}${DNSTT_PUBKEY}${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}          ➤  Main Command: menu                 ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo ""
+}
+
+# ══════════════════════════════════════════════
+#   WEBSOCKET PROXY INSTALL
+# ══════════════════════════════════════════════
+
+install_websocket() {
+  echo -e " ${Y}[*] Installing WebSocket proxy (port 8080)...${N}"
+
+  cat > /usr/local/bin/ws-proxy.py << 'PYEOF'
+#!/usr/bin/env python3
+import socket, threading, select, sys
+
+LISTEN_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+SSH_HOST = '127.0.0.1'
+SSH_PORT = 22
+NGINX_PORT = 8880
+BUFFER = 65535
+TIMEOUT = 60
+
+# V2Ray WS paths - forward to nginx
+V2RAY_PATHS = [b'/vmess', b'/vless', b'/trojan']
+
+RESPONSE_COLOR = (
+    b"HTTP/1.1 101 <font color=#FF0000>Blu-2026</font>\r\n"
+    b"Upgrade: websocket\r\n"
+    b"Connection: Upgrade\r\n"
+    b"Sec-WebSocket-Version: 13\r\n"
+    b"Via: Blu-2026-SSH\r\n"
+    b"\r\n"
+)
+
+RESPONSE_PLAIN = (
+    b"HTTP/1.1 101 Blu-2026 Protocols\r\n"
+    b"Upgrade: websocket\r\n"
+    b"Connection: Upgrade\r\n"
+    b"Sec-WebSocket-Version: 13\r\n"
+    b"Via: Blu-2026-SSH\r\n"
+    b"\r\n"
+)
+
+def forward(src, dst):
+    try:
+        while True:
+            r, _, _ = select.select([src], [], [], TIMEOUT)
+            if r:
+                d = src.recv(BUFFER)
+                if not d:
+                    break
+                dst.sendall(d)
+    except:
+        pass
+    finally:
+        try: src.close()
+        except: pass
+        try: dst.close()
+        except: pass
+
+def handle(client):
+    try:
+        data = client.recv(BUFFER)
+        if not data:
+            client.close()
+            return
+
+        # Check if it's a V2Ray WS path - forward to nginx
+        is_v2ray = False
+        is_http = data[:4] in (b'GET ', b'POST', b'HEAD', b'CONN')
+        is_websocket = b'Upgrade: websocket' in data or b'upgrade: websocket' in data
+
+        if is_http:
+            for path in V2RAY_PATHS:
+                if path in data:
+                    is_v2ray = True
+                    break
+
+        if is_v2ray:
+            # Forward to nginx for V2Ray
+            target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target.connect((SSH_HOST, NGINX_PORT))
+            target.sendall(data)
+            threading.Thread(target=forward, args=(client, target), daemon=True).start()
+            threading.Thread(target=forward, args=(target, client), daemon=True).start()
+        elif is_http and not is_websocket:
+            # Plain HTTP - always send plain response for response checkers
+            client.send(RESPONSE_PLAIN)
+            client.close()
+            return
+        else:
+            # SSH with or without payload
+            target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target.connect((SSH_HOST, SSH_PORT))
+            if is_http:
+                # HTTP payload with websocket - send colored 101 response then tunnel
+                client.send(RESPONSE_COLOR)
+            else:
+                # Raw SSH - forward data directly
+                target.sendall(data)
+            threading.Thread(target=forward, args=(client, target), daemon=True).start()
+            threading.Thread(target=forward, args=(target, client), daemon=True).start()
+    except:
+        try: client.close()
+        except: pass
+
+def start(port):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(('0.0.0.0', port))
+    srv.listen(200)
+    while True:
+        try:
+            c, _ = srv.accept()
+            threading.Thread(target=handle, args=(c,), daemon=True).start()
+        except:
+            pass
+
+if __name__ == '__main__':
+    start(LISTEN_PORT)
+PYEOF
+
+  chmod +x /usr/local/bin/ws-proxy.py
+
+  for PORT in 8080; do
+    cat > /etc/systemd/system/ws-proxy-${PORT}.service << EOF
+[Unit]
+Description=WebSocket Proxy Port ${PORT}
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/ws-proxy.py ${PORT}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl enable ws-proxy-${PORT} > /dev/null 2>&1
+    systemctl start ws-proxy-${PORT} > /dev/null 2>&1
+  done
+
+  echo -e " ${G}[✓] WebSocket proxy running on port 8080${N}"
+}
+
+# ══════════════════════════════════════════════
+#   NGINX INSTALL (V2Ray reverse proxy)
+# ══════════════════════════════════════════════
+
+install_nginx() {
+  echo -e " ${Y}[*] Installing Nginx reverse proxy...${N}"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y nginx > /dev/null 2>&1
+
+  # Remove default config
+  rm -f /etc/nginx/sites-enabled/default 2>/dev/null
+
+  # Nginx on 8880 routes V2Ray paths and WS
+  cat > /etc/nginx/conf.d/v2ray.conf << 'NGINXEOF'
+server {
+    listen 8880;
+    server_name _;
+
+    location /vmess {
+        proxy_pass http://127.0.0.1:10086;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400;
+    }
+
+    location /vless {
+        proxy_pass http://127.0.0.1:10087;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400;
+    }
+
+    location /trojan {
+        proxy_pass http://127.0.0.1:10088;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 86400;
+        add_header Upgrade "websocket" always;
+        add_header Connection "Upgrade" always;
+        add_header Sec-WebSocket-Version "13" always;
+        add_header Via "Blu-2026-SSH" always;
     }
 }
+NGINXEOF
 
-# Define ip_address as a global variable
-ip_address=$(hostname -I | awk '{print $1}')
+  # Remove default nginx site
+  rm -f /etc/nginx/sites-enabled/default 2>/dev/null
 
-
-# Function to send verification code to multiple Telegram handles using different APIs
-send_code_telegram() {
-     local telegram_handle=$1
-    local current_time=$(date +%s)
-    local storage_file="/root/vcheck/.storage.txt"  # Hidden file with a dot prefix
-
-    # Check if the vcheck folder exists, if not create it
-    if [[ ! -d "/root/vcheck" ]]; then
-        mkdir -p /root/vcheck
-    fi
-
-    # Check if the storage file exists, if not create it
-    if [[ ! -f "$storage_file" ]]; then
-        touch "$storage_file"
-        chmod 600 "$storage_file"  # Restrict permissions for security
-    fi
-
-    # Check if there's a recent request from the same IP address
-    local last_sent_code=$(awk -v ip="$ip_address" '$1 == ip {print $2}' "$storage_file")
-    local last_sent_time=$(awk -v ip="$ip_address" '$1 == ip {print $3}' "$storage_file")
-
-    # Adjust the time interval here (e.g., 600 for 10 minutes)
-    if [[ -n "$last_sent_code" && $((current_time - last_sent_time)) -lt 3600 ]]; then
-        # Calculate remaining time in seconds
-        local time_left=$((3600 - (current_time - last_sent_time)))
-
-        # Convert remaining time to minutes and seconds
-        local minutes=$((time_left / 60))
-        local seconds=$((time_left % 60))
-
-        # Display the message with the remaining time
-        echo -e "\033[1;36m======================================================================================\033[0m"
-        echo -e "\033[1;31m  CODE SENT ALREADY! YOU HAVE $minutes MINUTES AND $seconds SECONDS LEFT TO REDEEM IT \033[0m"
-        echo -e "\033[1;36m======================================================================================\033[0m"
-        echo ""
-        echo -e "\033[1;32m              @Mahalkokayo143  \033[0m on Telegram"
-        echo "" 
-        echo -e "\033[1;36m======================================================================================\033[0m"
-        echo ""
-        return
-    fi
-
-    # Generate random 6-digit code
-    local random_code=$(shuf -i 100000-999999 -n 1)
-
-    # Store the code along with the IP address and timestamp
-    echo "$ip_address $random_code $current_time" > "$storage_file"
-
-    # Send message to Telegram
-    local message="The verification code for $ip_address is: $random_code"
-    for ((i=0; i<${#bot_tokens[@]}; i++)); do
-        local bot_token="${bot_tokens[i]}"
-        local chat_id="${chat_ids[i]}"
-        curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" -d "chat_id=$chat_id" -d "text=$message" > /dev/null
-    done
-    echo -e "\033[1;36m=============================================================\033[0m"
-    echo -e "\033[1;31m       CONTACT TEAM VANTRICKS FOR VERIFICATION CODE\033[0m"
-    echo -e "\033[1;36m==============================================================\033[0m"
-    echo ""
-    echo -e "\033[1;32m              @Mahalkokayo143  \033[0m on Telegram"
-    echo "" 
-    echo -e "\033[1;36m=============================================================\033[0m"
-    echo ""
-    echo -e "\033[1;31m  Price is 1 gcash for the code with a validity period of 60 mins \033[0m"
-    echo ""
-}
-bot_tokens=("6681677222:AAHHZZxs8Q6IW9FtOzp76LVYkxt0_C7TXqc" "6324166685:AAFBfulzHQ66W03ZDkxGNulYJKUFJ2mxmkI")
-chat_ids=("5989863155" "5748048653")
-
-clear
-
-# Check for root privilege
-[[ "$(whoami)" != "root" ]] && {
-    echo -e "\033[1;33m[\033[1;31mErro\033[1;33m] \033[1;37m- \033[1;33m◇ YOU NEED TO RUN AS ROOT!\033[0m"
-    exit 0
+  systemctl enable nginx > /dev/null 2>&1
+  systemctl restart nginx > /dev/null 2>&1
+  echo -e " ${G}[✓] Nginx reverse proxy running on port 8880${N}"
 }
 
-# Generate and send the verification code
-send_code_telegram
 
-# Prompt the user to enter the verification code
-echo -n -e "\033[1;33m  ENTER VERIFICATION CODE: \033[0m"
-read user_code
-last_sent=$(awk -v ip="$ip_address" '$1 == ip {print $2}' "/root/vcheck/.storage.txt")
 
-# Compare the entered code with the generated code
-if [[ -z "$user_code" || "$user_code" != "$last_sent" ]]; then
-    echo ""
-    echo -e "\033[1;35mInvalid code. Installation aborted.\033[0m"
-    echo ""
-    exit 1
-else
-    rm -rf /root/vcheck
-fi
-clear
-# Variable Initialization
-_lnk=$(echo 'z1:y#x.5s0ul&p4hs$s.0a72d*n-e!v89e032:3r'| sed -e 's/[^a-z.]//ig'| rev)
-_Ink=$(echo '/3×u3#s87r/l32o4×c1a×l1/83×l24×i0b×'|sed -e 's/[^a-z/]//ig')
-_1nk=$(echo '/3×u3#s×87r/83×l2×4×i0b×'|sed -e 's/[^a-z/]//ig')
+install_v2ray_auto() {
+  echo -e " ${Y}[*] Installing Xray...${N}"
 
-# Welcome message
-echo -e "\033[1;31m\033[0m"
-tput setaf 7 ; tput setab 4 ; tput bold ; printf '%40s%s%-12s\n' "◇─────────ㅤ🌍WELCOME TO VANTRICKS VPS MANAGER🌍ㅤ─────────◇" ; tput sgr0
-echo ""
-echo -e "\033[1;33mㅤTHIS SCRIPT CONTAINS THE FOLLOWING!!\033[0m"
-echo ""
-echo -e "\033[1;33m◇ \033[1;32mINSTALL A SET OF SCRIPTS AS TOOLS FOR\033[0m"
-echo ""
-echo -e "\033[1;33m◇  \033[1;32mNETWORK, SYSTEM AND USER MANAGEMENT.\033[0m"
-echo -e "\033[1;33m◇  \033[1;32mEASY INTERFACE FOR BEGINNERS.\033[0m"
-echo ""
-echo -e "\033[1;31m◇──────────────ㅤ🌍 VANTRICKS VPS MANAGER 🌍ㅤ──────────────◇\033[0m"
-echo ""
+  # Install Xray using official script
+  bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
 
-# Prompt to continue
-echo -ne "\033[1;36m◇ Do you want to continue? [Y/N]: \033[1;37m"
-read x
-[[ $x = @(n|N) ]] && exit
+  mkdir -p /usr/local/etc/xray /etc/xray
+  touch /etc/xray/accounts.db
 
-# Modify SSH configuration and restart service
-sed -i 's/Port 22222/Port 22/g' /etc/ssh/sshd_config  > /dev/null 2>&1
-service ssh restart  > /dev/null 2>&1
+  # Write config - only VMess to keep it simple and stable
+  cat > /usr/local/etc/xray/config.json << CFGEOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 10086,
+      "listen": "127.0.0.1",
+      "protocol": "vmess",
+      "settings": {
+        "clients": []
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/vmess"
+        }
+      }
+    },
+    {
+      "port": 10087,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/vless"
+        }
+      }
+    },
+    {
+      "port": 10088,
+      "listen": "127.0.0.1",
+      "protocol": "trojan",
+      "settings": {
+        "clients": []
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/trojan"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+CFGEOF
 
-# Prompt user if they want to add a domain name
-echo -ne "\033[1;36m◇ Do you want to add a domain name? [Y/N]: \033[0m"
-read add_domain
-echo ""
-echo -e "\033[1;32m>>> Please make sure your DOMAIN is linked to Cloudflare for proper functionality <<<\033[0m"
+  echo -e " ${G}[✓] V2Ray config written${N}"
 
-if [[ "$add_domain" == "Y" || "$add_domain" == "y" ]]; then
-    domain_attempts=0
-    while [[ $domain_attempts -lt 3 ]]; do
-        # Prompt user to enter domain name
-        echo ""
-        echo -ne "\033[1;36m◇ Please enter your domain name (e.g., example.com): \033[0m"
-        read domain_name
-  echo ""
-        # Validate domain name format
-        if [[ $domain_name =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-            # Display domain name for confirmation
-            echo -e "\033[1;33mYou entered the domain name: \033[1;32m$domain_name\033[0m"      
-echo "$domain_name" > /etc/.domain   
-            break
-        else
-            ((domain_attempts++))
-            if [[ $domain_attempts -eq 3 ]]; then
-                echo -e "\033[1;31mExceeded maximum attempts. No domain name will be added.\033[0m"
-                break
-            else
-                echo -e "\033[1;31mInvalid domain name format. Please enter a valid domain name.\033[0m"
-            fi
-        fi
-    done
-else
-    echo -e "\033[1;33mNo domain name will be added.\033[0m"
-fi
+  systemctl daemon-reload > /dev/null 2>&1
+  systemctl enable xray > /dev/null 2>&1
+  systemctl restart xray > /dev/null 2>&1
+  sleep 3
 
-# Key Verification
-echo -e "\n\033[1;36m◇ CHECKING...(It Take Some Time Please Wait!)\033[1;37m 16983:16085\033[0m" ; rm $_Ink/list > /dev/null 2>&1; wget -P $_Ink https://raw.githubusercontent.com/hacktricks2023/VANTRICKS-VPS-MANAGER/main/Install/list > /dev/null 2>&1; verif_key
-sleep 3s
+  if systemctl is-active --quiet xray; then
+    echo -e " ${G}[✓] V2Ray/Xray installed and running!${N}"
+  else
+    echo -e " ${R}[!] V2Ray failed - check: journalctl -u xray -n 20${N}"
+  fi
+}
 
-# Update system
-echo "/bin/menu" > /bin/h && chmod +x /bin/h > /dev/null 2>&1
-rm versao* > /dev/null 2>&1
-wget https://raw.githubusercontent.com/hacktricks2023/VANTRICKS-VPS-MANAGER/main/Install/versao > /dev/null 2>&1
-> /dev/null 2>&1
-wget https://iplogger.org/2lHZ43 > /dev/null 2>&1
-> /dev/null 2>&1
-rm 2lHZ43 > /dev/null 2>&1
+# ══════════════════════════════════════════════
+#   SSL INSTALL (STUNNEL + SSLH)
+# ══════════════════════════════════════════════
 
-# Prompt to keep or create user database
-echo -e "\n\033[1;32m◇ KEY VALID!\033[1;32m"
-sleep 1s
-echo ""
-[[ -f "$HOME/usuarios.db" ]] && {
+install_ssl() {
+  echo -e " ${Y}[*] Installing SSL + Multiplexer on ports 80, 443...${N}"
+
+  # Install stunnel — package name same across versions
+  DEBIAN_FRONTEND=noninteractive apt-get install -y stunnel4 > /dev/null 2>&1
+
+  # Install sslh
+  echo "sslh sslh/inetd_or_standalone select standalone" | debconf-set-selections
+  DEBIAN_FRONTEND=noninteractive apt-get install -y sslh > /dev/null 2>&1
+
+  # Generate SSL cert — try Let's Encrypt first, fallback to self-signed
+  mkdir -p /etc/stunnel
+  CERT_OBTAINED=false
+
+  # Try Let's Encrypt using the HOST domain
+  if [ -n "$HOST" ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y certbot > /dev/null 2>&1
+    # Temporarily free port 80 for certbot standalone
+    fuser -k 80/tcp > /dev/null 2>&1
+    sleep 1
+    if certbot certonly --standalone -d "$HOST" \
+      --non-interactive --agree-tos -m "admin@${HOST}" \
+      --http-01-port 80 > /dev/null 2>&1; then
+      # Use Let's Encrypt cert in stunnel
+      cat > /etc/stunnel/stunnel.conf << EOF
+cert = /etc/letsencrypt/live/${HOST}/fullchain.pem
+key = /etc/letsencrypt/live/${HOST}/privkey.pem
+socket = a:SO_REUSEADDR=1
+socket = l:TCP_NODELAY=1
+socket = r:TCP_NODELAY=1
+foreground = yes
+
+[ssl-all]
+accept = 127.0.0.1:7443
+connect = 127.0.0.1:8080
+EOF
+      CERT_OBTAINED=true
+      echo -e " ${G}[✓] Let's Encrypt SSL certificate obtained for $HOST${N}"
+    fi
+  fi
+
+  # Fallback to self-signed if Let's Encrypt failed
+  if [ "$CERT_OBTAINED" = false ]; then
+    openssl req -new -x509 -days 3650 -nodes \
+      -out /etc/stunnel/stunnel.pem \
+      -keyout /etc/stunnel/stunnel.pem \
+      -subj "/CN=Blu-2026" > /dev/null 2>&1
+    chmod 600 /etc/stunnel/stunnel.pem
+    echo -e " ${Y}[!] Using self-signed cert (Let's Encrypt failed)${N}"
+
+    # Write stunnel config with self-signed cert
+    cat > /etc/stunnel/stunnel.conf << 'EOF'
+cert = /etc/stunnel/stunnel.pem
+socket = a:SO_REUSEADDR=1
+socket = l:TCP_NODELAY=1
+socket = r:TCP_NODELAY=1
+foreground = yes
+
+[ssl-all]
+accept = 127.0.0.1:7443
+connect = 127.0.0.1:8080
+EOF
+  fi
+
+  # Stunnel systemd service
+  rm -rf /etc/systemd/system/stunnel4.service.d/ 2>/dev/null
+  cat > /etc/systemd/system/stunnel4.service << 'SEOF'
+[Unit]
+Description=SSL tunnel
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/stunnel4 /etc/stunnel/stunnel.conf
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SEOF
+
+  # Enable stunnel
+  sed -i '/^ENABLED/d' /etc/default/stunnel4 2>/dev/null
+  echo "ENABLED=1" >> /etc/default/stunnel4
+  systemctl daemon-reload > /dev/null 2>&1
+  systemctl enable stunnel4 > /dev/null 2>&1
+  systemctl restart stunnel4 > /dev/null 2>&1
+  sleep 2
+
+  # SSLH: multiplexer on 80 and 443
+  # Detect sslh version — 1.x uses CLI args, 2.x uses config file
+  SSLH_VER=$(sslh -V 2>&1 | grep -oP '\d+' | head -1)
+  mkdir -p /var/run/sslh /etc/sslh
+  chown sslh:sslh /var/run/sslh 2>/dev/null || true
+
+  if [ "${SSLH_VER}" -ge 2 ] 2>/dev/null; then
+    # sslh 2.x — use config file
+    cat > /etc/sslh/sslh.cfg << 'EOF'
+foreground: true;
+inetd: false;
+numeric: false;
+transparent: false;
+timeout: 5;
+user: "sslh";
+pidfile: "/var/run/sslh/sslh.pid";
+
+listen:
+(
+  { host: "0.0.0.0"; port: "80"; },
+  { host: "0.0.0.0"; port: "443"; }
+);
+
+protocols:
+(
+  { name: "ssh";     host: "127.0.0.1"; port: "22";   log_level: 0; },
+  { name: "tls";     host: "127.0.0.1"; port: "7443"; log_level: 0; },
+  { name: "http";    host: "127.0.0.1"; port: "8880"; log_level: 0; },
+  { name: "anyprot"; host: "127.0.0.1"; port: "8080"; log_level: 0; }
+);
+EOF
+    cat > /etc/systemd/system/sslh.service << 'SSLHEOF'
+[Unit]
+Description=SSL/SSH Multiplexer
+After=network.target ssh.service stunnel4.service nginx.service
+Wants=ssh.service stunnel4.service nginx.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/sbin/sslh-select -F /etc/sslh/sslh.cfg
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SSLHEOF
+  else
+    # sslh 1.x — use command line args
+    cat > /etc/systemd/system/sslh.service << 'SSLHEOF'
+[Unit]
+Description=SSL/SSH Multiplexer
+After=network.target ssh.service stunnel4.service nginx.service
+Wants=ssh.service stunnel4.service nginx.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/sbin/sslh -f \
+  -p 0.0.0.0:80 \
+  -p 0.0.0.0:443 \
+  --ssh 127.0.0.1:22 \
+  --tls 127.0.0.1:7443 \
+  --http 127.0.0.1:8880 \
+  --anyprot 127.0.0.1:8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SSLHEOF
+  fi
+
+  if [ -f /etc/default/sslh ]; then
+    sed -i 's/^RUN=.*/RUN=yes/' /etc/default/sslh
+  fi
+  systemctl daemon-reload > /dev/null 2>&1
+  systemctl enable sslh > /dev/null 2>&1
+  # Make sure ports are free before starting sslh
+  fuser -k 80/tcp > /dev/null 2>&1
+  fuser -k 443/tcp > /dev/null 2>&1
+  sleep 2
+  systemctl restart sslh > /dev/null 2>&1
+  sleep 3
+
+  echo -e " ${G}[✓] Stunnel: port 7443(SSH-SSL) port 444(WS-SSL)${N}"
+  echo -e " ${G}[✓] SSLH multiplexer on ports 80, 443${N}"
+}
+
+# ══════════════════════════════════════════════
+#   DNSTT INSTALL
+# ══════════════════════════════════════════════
+
+install_dnstt() {
+  echo -e " ${Y}[*] Installing DNSTT...${N}"
+
+  # Install latest Go
+  GO_VER="1.22.5"
+  wget -q "https://go.dev/dl/go${GO_VER}.linux-amd64.tar.gz" -O /tmp/go.tar.gz 2>/dev/null
+  rm -rf /usr/local/go
+  tar -C /usr/local -xzf /tmp/go.tar.gz > /dev/null 2>&1
+  export PATH=$PATH:/usr/local/go/bin
+
+  # Download and build dnstt
+  apt-get install -y unzip > /dev/null 2>&1
+  wget -q "https://www.bamsoftware.com/software/dnstt/dnstt-20220208.zip" -O /tmp/dnstt.zip 2>/dev/null
+  cd /tmp && unzip -o dnstt.zip > /dev/null 2>&1
+  cd /tmp/dnstt-20220208/dnstt-server
+  /usr/local/go/bin/go build . > /dev/null 2>&1
+  cp dnstt-server /usr/local/bin/dnstt-server
+  chmod +x /usr/local/bin/dnstt-server
+
+  # Generate keypair
+  /usr/local/bin/dnstt-server -gen-key -privkey-file /etc/dnstt-priv.key -pubkey-file /etc/dnstt-pub.key > /dev/null 2>&1
+
+  # Save pubkey to config
+  DNSTT_PUBKEY=$(cat /etc/dnstt-pub.key 2>/dev/null | tr -d '\n' || echo "N/A")
+  sed -i '/^DNSTT_PUBKEY/d' "$CONFIG_FILE"
+  echo "DNSTT_PUBKEY=$DNSTT_PUBKEY" >> "$CONFIG_FILE"
+
+  # Create startup script — DNSTT on port 53
+  cat > /usr/local/bin/dnstt-start.sh << EOF
+#!/bin/bash
+exec /usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/dnstt-priv.key ${NAMESERVER} 127.0.0.1:22
+EOF
+  chmod +x /usr/local/bin/dnstt-start.sh
+
+  # Create systemd service
+  cat > /etc/systemd/system/dnstt.service << 'EOF'
+[Unit]
+Description=DNSTT DNS Tunnel Server
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/dnstt-start.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # Free port 53 from systemd-resolved
+  systemctl stop systemd-resolved > /dev/null 2>&1
+  systemctl disable systemd-resolved > /dev/null 2>&1
+
+  # Make DNS persistent across reboots
+  rm -f /etc/resolv.conf
+  echo "nameserver 8.8.8.8" > /etc/resolv.conf
+  echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+  # Lock the file so systemd-resolved can't overwrite it
+  chattr +i /etc/resolv.conf 2>/dev/null || true
+
+  systemctl daemon-reload > /dev/null 2>&1
+  systemctl enable dnstt > /dev/null 2>&1
+  systemctl start dnstt > /dev/null 2>&1
+
+  # Check if started
+  sleep 2
+  if systemctl is-active --quiet dnstt; then
+    echo -e " ${G}[✓] DNSTT running on port 53${N}"
+  else
+    echo -e " ${Y}[!] DNSTT installed but may need DNS record setup${N}"
+  fi
+}
+
+install_custom_openssh() {
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    build-essential zlib1g-dev libssl-dev libpam0g-dev \
+    libselinux1-dev libedit-dev autoconf > /dev/null 2>&1
+
+  OPENSSH_VER="9.2p1"
+  cd /tmp
+  wget -q "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VER}.tar.gz" -O openssh-src.tar.gz 2>/dev/null
+  tar -xzf openssh-src.tar.gz > /dev/null 2>&1
+  cd openssh-${OPENSSH_VER}
+
+  # Patch version string
+  sed -i 's/#define SSH_VERSION.*/#define SSH_VERSION "Blu-2026-SSH"/' version.h
+  sed -i 's/#define SSH_PORTABLE.*/#define SSH_PORTABLE ""/' version.h
+
+  ./configure --prefix=/usr --sysconfdir=/etc/ssh --with-pam > /dev/null 2>&1
+  make -j$(nproc) > /dev/null 2>&1
+
+  # Stop ssh before replacing binary to avoid "Text file busy"
+  systemctl stop ssh > /dev/null 2>&1
+  systemctl stop sshd > /dev/null 2>&1
+  install -m 755 sshd /usr/sbin/sshd
+
+  # Create required dirs and sshd user for privilege separation
+  mkdir -p /var/empty /run/sshd
+  chown root:root /var/empty
+  chmod 755 /var/empty
+  useradd -r -s /sbin/nologin -d /var/empty sshd > /dev/null 2>&1 || true
+
+  # Fix systemd service to use -D flag (foreground) with Type=simple
+  cat > /etc/systemd/system/ssh.service << 'SVCEOF'
+[Unit]
+Description=Blu-2026-SSH Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/sshd -D
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+  systemctl daemon-reload > /dev/null 2>&1
+  systemctl enable ssh > /dev/null 2>&1
+  systemctl start ssh > /dev/null 2>&1
+
+  cd /tmp && rm -rf openssh-${OPENSSH_VER} openssh-src.tar.gz
+  echo -e " ${G}[✓] Blu-2026-SSH installed!${N}"
+}
+
+main_menu() {
+  # Auto-fix apache2 if running — kills multiplexer
+  systemctl stop apache2 > /dev/null 2>&1
+  systemctl disable apache2 > /dev/null 2>&1
+  systemctl mask apache2 > /dev/null 2>&1
+  if systemctl is-active apache2 > /dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y apache2 apache2-* > /dev/null 2>&1
+    fuser -k 80/tcp > /dev/null 2>&1
+    fuser -k 443/tcp > /dev/null 2>&1
+    systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
+  fi
+
+  # Install Blu-2026-startup service if missing (for old servers)
+  if [ ! -f /etc/systemd/system/Blu-2026-startup.service ]; then
+    cat > /usr/local/bin/Blu-2026-startup.sh << 'STARTEOF'
+#!/bin/bash
+systemctl stop apache2 > /dev/null 2>&1
+systemctl mask apache2 > /dev/null 2>&1
+fuser -k 80/tcp > /dev/null 2>&1
+fuser -k 443/tcp > /dev/null 2>&1
+chattr -i /etc/resolv.conf > /dev/null 2>&1
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+chattr +i /etc/resolv.conf > /dev/null 2>&1
+sleep 3
+systemctl restart ssh > /dev/null 2>&1
+systemctl restart stunnel4 > /dev/null 2>&1
+systemctl restart nginx > /dev/null 2>&1
+systemctl restart ws-proxy-8080 > /dev/null 2>&1
+sleep 3
+systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
+systemctl restart xray > /dev/null 2>&1
+systemctl restart dnstt > /dev/null 2>&1
+STARTEOF
+    chmod +x /usr/local/bin/Blu-2026-startup.sh
+    cat > /etc/systemd/system/Blu-2026-startup.service << 'SVCEOF'
+[Unit]
+Description=Blu-2026 Script Startup
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/Blu-2026-startup.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    systemctl daemon-reload > /dev/null 2>&1
+    systemctl enable Blu-2026-startup > /dev/null 2>&1
+  fi
+
+  while true; do
+    auto_remove_expired
+    get_info
+    source "$CONFIG_FILE" 2>/dev/null
     clear
-    echo -e "\n\033[0;34m◇───────────────────────────────────────────────────◇\033[0m"
-    echo ""
-    echo -e "                 \033[1;33m• \033[1;31m◇ ATTENTION!\033[1;33m• \033[0m"
-    echo ""
-    echo -e "\033[1;33mA User Database \033[1;32m(usuarios.db) \033[1;33mwas"
-    echo -e "Found! Want to keep it by preserving the limit"
-    echo -e "of Simutanea connections of users ? Or Want"
-    echo -e "create a new database?\033[0m"
-    echo -e "\n\033[1;37m[\033[1;31m1\033[1;37m] \033[1;33mKeep Database Current\033[0m"
-    echo -e "\033[1;37m[\033[1;31m2\033[1;37m] \033[1;33mCreate a New Database\033[0m"
-    echo -e "\n\033[0;34m◇───────────────────────────────────────────────────◇\033[0m"
-    echo ""
-    tput setaf 2 ; tput bold ; read -p "Option ?: " -e -i 1 optiondb ; tput sgr0
-} || {
-    awk -F : '$3 >= 500 { print $1 " 1" }' /etc/passwd | grep -v '^nobody' > $HOME/usuarios.db
+    # Service status inline
+    SSH_S=$(systemctl is-active ssh 2>/dev/null)
+    [ "$SSH_S" != "active" ] && SSH_S=$(systemctl is-active sshd 2>/dev/null)
+    SSL_S=$(systemctl is-active stunnel4 2>/dev/null)
+    MUX_S1=$(systemctl is-active sslh 2>/dev/null)
+    MUX_S2=$(systemctl is-active sslh-select 2>/dev/null)
+    WS_S=$(systemctl is-active ws-proxy-8080 2>/dev/null)
+    XRAY_S=$(systemctl is-active xray 2>/dev/null)
+    NGX_S=$(systemctl is-active nginx 2>/dev/null)
+    [ "$SSH_S" == "active" ]  && SSH_DOT="${G}ON${N}"  || SSH_DOT="${R}OFF${N}"
+    [ "$SSL_S" == "active" ]  && SSL_DOT="${G}ON${N}"  || SSL_DOT="${R}OFF${N}"
+    ( [ "$MUX_S1" == "active" ] || [ "$MUX_S2" == "active" ] ) && MUX_DOT="${G}ON${N}" || MUX_DOT="${R}OFF${N}"
+    [ "$WS_S" == "active" ]   && WS_DOT="${G}ON${N}"   || WS_DOT="${R}OFF${N}"
+    [ "$XRAY_S" == "active" ] && XRAY_DOT="${G}ON${N}" || XRAY_DOT="${R}OFF${N}"
+    [ "$NGX_S" == "active" ]  && NGX_DOT="${G}ON${N}"  || NGX_DOT="${R}OFF${N}"
+
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}        ${W}Blu-2026 Script V1${N}                    ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N} ${Y}●${N} OS       : ${W}$OS${N}"
+    echo -e "${C}║${N} ${Y}●${N} CPU      : ${W}$CPU_CORES Core  Load: $CPU_LOAD%%${N}"
+    echo -e "${C}║${N} ${Y}●${N} RAM      : ${W}${RAM_USED}/${RAM_TOTAL} MB  (${RAM_PERCENT}%%)${N}"
+    echo -e "${C}║${N} ${Y}●${N} Time     : ${W}$DATETIME${N}"
+    echo -e "${C}║${N} ${Y}●${N} IP VPS   : ${W}$SERVER_IP${N}"
+    echo -e "${C}║${N} ${Y}●${N} Domain   : ${W}$HOST${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}         ${W}❱❱ ACCOUNT INFORMATION ❰❰${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${C}SSH/WS/SSL ${N}: ${G}$SSH_ACCOUNTS${N}   ${C}XRAY     ${N}: ${G}$V2RAY_ACCOUNTS${N}"
+    echo -e "${C}║${N}  ${C}SSH Online ${N}: ${G}$SSH_ONLINE${N}   ${C}Total    ${N}: ${G}$TOTAL_ACCOUNTS${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}          ${W}❱❱ SERVICES STATUS ❰❰${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  SSH         : $SSH_DOT       SSL         : $SSL_DOT"
+    echo -e "${C}║${N}  MULTIPLEXER : $MUX_DOT       NGINX       : $NGX_DOT"
+    echo -e "${C}║${N}  WEBSOCKET   : $WS_DOT       XRAY        : $XRAY_DOT"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}            ${W}❱❱ MAIN MENU ❰❰${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} SSH Management    ${W}[4]${N} Restart Services"
+    echo -e "${C}║${N}  ${W}[2]${N} V2Ray Management   ${W}[5]${N} Server Info"
+    echo -e "${C}║${N}  ${W}[3]${N} Services Status   ${W}[0]${N} Exit"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Option >>> " OPT
+    case $OPT in
+      1) ssh_menu ;;
+      2) v2ray_menu ;;
+      3) check_services ;;
+      4) restart_services ;;
+      5) show_summary; press_enter ;;
+      0) clear; exit 0 ;;
+      *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
+    esac
+  done
 }
-[[ "$optiondb" = '2' ]] && awk -F : '$3 >= 500 { print $1 " 1" }' /etc/passwd | grep -v '^nobody' > $HOME/usuarios.db
-clear
-tput setaf 7 ; tput setab 4 ; tput bold ; printf '%35s%s%-18s\n' "◇ WAIT FOR INSTALLATION." ; tput sgr0
-echo ""
-echo ""
-echo -e "          \033[1;33m[\033[1;31m!\033[1;33m] \033[1;32m◇ UPDATING SYSTEM...\033[1;33m[\033[1;31m!\033[1;33m]\033[0m"
-echo ""
-echo -e "    \033[1;33m◇ UPDATES USUALLY TAKE A LITTLE TIME!\033[0m"
-echo ""
-fun_attlist () {
-    apt-get update -y
-    [[ ! -d /usr/share/.hehe ]] && mkdir /usr/share/.hehe
-    echo "crz: $(date)" > /usr/share/.hehe/.hehe
+
+# ══════════════════════════════════════════════
+#   SSH MENU
+# ══════════════════════════════════════════════
+
+ssh_menu() {
+  while true; do
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}           ${W}SSH MANAGEMENT${N}                   ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} Create Account                       ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[2]${N} Delete Account                       ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[3]${N} Check Account                        ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[4]${N} List All Accounts                    ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                    ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Option >>> " OPT
+    case $OPT in
+      1) create_user ;;
+      2) remove_user ;;
+      3) check_user ;;
+      4) list_users ;;
+      0) break ;;
+      *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
+    esac
+  done
 }
-fun_bar 'fun_attlist'
-clear
-echo ""
-echo -e "          \033[1;33m[\033[1;31m!\033[1;33m] \033[1;32m◇ INSTALLING PACKAGES\033[1;33m[\033[1;31m!\033[1;33m] \033[0m"
-echo ""
-echo -e "\033[1;33m◇ SOME PACKAGES ARE EXTREMELY NECESSARY!\033[0m"
-echo ""
-inst_pct() {
-    _pacotes=("bc" "apache2" "cron" "screen" "nano" "unzip" "lsof" "netstat" "net-tools" "dos2unix" "nload" "jq" "curl" "figlet" "python" "python2" "python3" "python-pip")
-    # Install packages
-    for _prog in "${_pacotes[@]}"; do
-        sudo apt install $_prog -y
-    done
-    
-    # Create user only once
-    username="lxd1"
-    password="0001"
-    
-    # Check if the username already exists
-    if id "$username" &>/dev/null; then
-        echo "User '$username' already exists. Overwriting..."
-        sudo userdel -r $username
+
+# ══════════════════════════════════════════════
+#   CREATE USER
+# ══════════════════════════════════════════════
+
+create_user() {
+  source "$CONFIG_FILE"
+  clear
+  DATETIME=$(TZ="Asia/Manila" date "+%m-%d-%Y %I:%M:%S %p")
+  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+  echo -e "${C}║${N}           ${W}CREATE SSH ACCOUNT${N}               ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  Time : ${G}$DATETIME${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  read -p "  Enter username: " NEW_USER
+  read -p "  Enter password: " NEW_PASS
+  read -p "  Expiration (days): " EXP_DAYS
+  read -p "  Online Limit: " MAX_SESSION
+
+  if [ -z "$NEW_USER" ] || [ -z "$NEW_PASS" ] || [ -z "$EXP_DAYS" ]; then
+    echo -e " ${R}[!] All fields are required!${N}"
+    sleep 2; return
+  fi
+
+  if id "$NEW_USER" &>/dev/null; then
+    echo -e " ${R}[!] User '$NEW_USER' already exists!${N}"
+    sleep 2; return
+  fi
+
+  MAX_SESSION=${MAX_SESSION:-2}
+  EXP_DATE_DISPLAY=$(TZ="Asia/Manila" date -d "+${EXP_DAYS} days" "+%m-%d-%Y %I:%M:%S %p")
+  EXP_DATE_SYSTEM=$(date -d "+${EXP_DAYS} days" "+%Y-%m-%d")
+
+  useradd -m -s /bin/bash "$NEW_USER" > /dev/null 2>&1
+  echo "${NEW_USER}:${NEW_PASS}" | chpasswd > /dev/null 2>&1
+  chage -E "$EXP_DATE_SYSTEM" "$NEW_USER" > /dev/null 2>&1
+
+  if ! grep -q "Match User $NEW_USER" /etc/ssh/sshd_config; then
+    echo "" >> /etc/ssh/sshd_config
+    echo "Match User $NEW_USER" >> /etc/ssh/sshd_config
+    echo "    MaxSessions $MAX_SESSION" >> /etc/ssh/sshd_config
+  fi
+  systemctl restart ssh > /dev/null 2>&1
+
+  clear
+  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+  echo -e "${C}║${N}         ${G}✔ ACCOUNT CREATED!${N}                 ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  Username        : ${G}$NEW_USER${N}"
+  echo -e "${C}║${N}  Password        : ${G}$NEW_PASS${N}"
+  echo -e "${C}║${N}  Expiration      : ${G}${EXP_DAYS} Day/s${N}"
+  echo -e "${C}║${N}  Online Limit    : ${G}$MAX_SESSION${N}"
+  echo -e "${C}║${N}  Expire Date     : ${G}$EXP_DATE_DISPLAY${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  Host            : ${G}$HOST${N}"
+  echo -e "${C}║${N}  Nameserver      : ${G}$NAMESERVER${N}"
+  echo -e "${C}║${N}  Public Key      : ${G}${DNSTT_PUBKEY}${N}"
+  echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+  press_enter
+}
+
+# ══════════════════════════════════════════════
+#   REMOVE USER
+# ══════════════════════════════════════════════
+
+remove_user() {
+  while true; do
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}          ${W}DELETE SSH ACCOUNT${N}                ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+
+    USERS=()
+    INDEX=1
+    while IFS=: read -r user _ uid _ _ _ _; do
+      if [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
+        EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+        EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
+        NOW_S=$(date +%s)
+        # Only show active (non-expired) accounts
+        if [ "$EXP" == "never" ] || [ "$EXP_S" -gt "$NOW_S" ] 2>/dev/null; then
+          SESS=$(ps aux | grep -c "sshd: $user@" 2>/dev/null || echo 0)
+          echo -e "${C}║${N}  ${W}[$INDEX]${N} $user  ${Y}|${N} Exp: ${G}$EXP${N}  ${Y}|${N} Online: ${G}$SESS${N}"
+          USERS+=("$user")
+          INDEX=$((INDEX + 1))
+        fi
+      fi
+    done < /etc/passwd
+
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[e]${N} Delete All Expired Accounts          ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[A]${N} Delete All Accounts (Force)          ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back to Menu                         ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Option >>> " DEL_OPT
+
+    if [ "$DEL_OPT" == "0" ]; then
+      break
+
+    elif [ "$DEL_OPT" == "e" ]; then
+      COUNT=0
+      for u in "${USERS[@]}"; do
+        EXP=$(chage -l "$u" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+        if [ "$EXP" == "never" ] || [[ $(date -d "$EXP" +%s 2>/dev/null) -lt $(date +%s) ]]; then
+          sed -i "/Match User $u/,/MaxSessions/d" /etc/ssh/sshd_config
+          userdel -r "$u" > /dev/null 2>&1
+          COUNT=$((COUNT + 1))
+        fi
+      done
+      systemctl restart ssh > /dev/null 2>&1
+      echo -e "\n${G} [✓] Deleted $COUNT expired/no-expiration users!${N}"
+      sleep 2
+
+    elif [ "$DEL_OPT" == "A" ]; then
+      for u in "${USERS[@]}"; do
+        sed -i "/Match User $u/,/MaxSessions/d" /etc/ssh/sshd_config
+        userdel -r "$u" > /dev/null 2>&1
+      done
+      systemctl restart ssh > /dev/null 2>&1
+      echo -e "\n${G} [✓] All users deleted!${N}"
+      sleep 2
+
+    elif [[ "$DEL_OPT" =~ ^[0-9]+$ ]] && [ "$DEL_OPT" -ge 1 ] && [ "$DEL_OPT" -lt "$INDEX" ]; then
+      TARGET="${USERS[$((DEL_OPT - 1))]}"
+      sed -i "/Match User $TARGET/,/MaxSessions/d" /etc/ssh/sshd_config
+      userdel -r "$TARGET" > /dev/null 2>&1
+      systemctl restart ssh > /dev/null 2>&1
+      echo -e "\n${G} [✓] User '$TARGET' deleted!${N}"
+      sleep 2
+
+    else
+      echo -e "\n${R} [!] Invalid option!${N}"
+      sleep 1
     fi
-    
-    # Create the system user with disabled login
-    sudo adduser --system --disabled-login $username
-    
-    # Set the password for the user
-    echo "$username:$password" | sudo chpasswd
-
-    # Install Python package using pip
-    pip install speedtest-cli
+  done
 }
 
-fun_bar 'inst_pct'
-[[ -f "/usr/sbin/ufw" ]] && ufw allow 443/tcp ; ufw allow 80/tcp ; ufw allow 3128/tcp ; ufw allow 8799/tcp ; ufw allow 8080/tcp
-clear
-echo ""
-echo -e "              \033[1;33m[\033[1;31m!\033[1;33m] \033[1;32m◇ FINISHING...\033[1;33m[\033[1;31m!\033[1;33m] \033[0m"
-echo ""
-echo -e "      \033[1;33m◇ COMPLETING FUNCTIONS AND SETTINGS!\033[0m"
-echo ""
-fun_bar "$_Ink/list $_lnk $_Ink $_1nk $key"
-clear
-echo ""
-cd $HOME
-IP=$(wget -qO- ipv4.icanhazip.com)
-echo -e "        \033[1;33m  \033[1;32m◇ INSTALLATION COMPLETED.◇\033[1;33m  \033[0m"
-echo ""
-echo -e "\033[1;31m\033[1;33m◇ MAIN COMMAND:- \033[1;32mmenu\033[0m"
-echo -e "\033[1;33m◇ MORE INFORMATION \033[1;31m(\033[1;36m◇ TELEGRAM\033[1;31m): \033[1;37m@VANTRICKS_VPS_MANAGER \033[1;31m( \033[1;36m @Mahalkokayo143 \033[1;31m )\033[0m"
-echo -e ""
+# ══════════════════════════════════════════════
+#   CHECK USER
+# ══════════════════════════════════════════════
 
-read -p "Do you want to install SlowDns SCRIPT or UDP Request? [S/U] " choice
-case "$choice" in
-  s|S ) 
-    read -p "Do you want to install SlowDns SCRIPT ? [  (Y/N) ]: " slowdns_choice
-    case "$slowdns_choice" in
-      y|Y ) 
-        rm -rf install; 
-        wget https://raw.githubusercontent.com/leitura/slowdns/main/install; 
-        chmod +x install; 
-        ./install;;
-      n|N ) 
-        echo "You chose not to install the SlowDNS script. Please enter 'menu' to access the SSH account.";;
-      * ) 
-        echo "Invalid choice. Please enter 'Y' for Yes or 'N' for No.";;
-    esac
-    ;;
-  u|U )
-    read -p "Do you want to install UDP Request SCRIPT ? [  (Y/N) ]: " udp_choice
-    case "$udp_choice" in
-      y|Y ) 
-        wget https://raw.githubusercontent.com/AVEGAH/SocksIP-udpServer/main/UDPserver.sh; 
-        chmod +x UDPserver.sh; 
-        ./UDPserver.sh;;
-      n|N ) 
-        echo "You chose not to install the UDP Request script. Please enter 'menu' to access the SSH account.";;
-      * ) 
-        echo "Invalid choice. Please enter 'Y' for Yes or 'N' for No.";;
-    esac
-    ;;
-  * ) 
-    echo "Invalid choice. Please enter 'S' for SlowDns or 'U' for UDP Request.";;
-esac
+check_user() {
+  while true; do
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}           ${W}CHECK SSH ACCOUNT${N}                ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
 
-rm $HOME/hehe && cat /dev/null > ~/.bash_history && history -c
+    USERS=()
+    INDEX=1
+    while IFS=: read -r user _ uid _ _ _ _; do
+      if [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
+        EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+        EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
+        NOW_S=$(date +%s)
+        # Only show active (non-expired) accounts
+        if [ "$EXP" == "never" ] || [ "$EXP_S" -gt "$NOW_S" ] 2>/dev/null; then
+          SESS=$(ps aux | grep -c "sshd: $user@" 2>/dev/null || echo 0)
+          echo -e "${C}║${N}  ${W}[$INDEX]${N} $user  ${Y}|${N} Exp: ${G}$EXP${N}  ${Y}|${N} Online: ${G}$SESS${N}"
+          USERS+=("$user")
+          INDEX=$((INDEX + 1))
+        fi
+      fi
+    done < /etc/passwd
+
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back to Menu                         ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Option >>> " CHK_OPT
+
+    if [ "$CHK_OPT" == "0" ]; then
+      break
+    elif [[ "$CHK_OPT" =~ ^[0-9]+$ ]] && [ "$CHK_OPT" -ge 1 ] && [ "$CHK_OPT" -lt "$INDEX" ]; then
+      CHK_USER="${USERS[$((CHK_OPT - 1))]}"
+      EXP=$(chage -l "$CHK_USER" | grep "Account expires" | cut -d: -f2 | xargs)
+      ONLINE=$(ps aux | grep -c "sshd: $CHK_USER@" 2>/dev/null || echo 0)
+      MAXSESS=$(grep -A1 "Match User $CHK_USER" /etc/ssh/sshd_config | grep MaxSessions | awk '{print $2}')
+      MAXSESS=${MAXSESS:-2}
+      EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
+      NOW_S=$(date +%s)
+      if [ "$EXP_S" -lt "$NOW_S" ] 2>/dev/null; then
+        STATUS="${R}EXPIRED${N}"
+      else
+        STATUS="${G}ACTIVE${N}"
+      fi
+      clear
+      echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+      echo -e "${C}║${N}           ${W}ACCOUNT DETAILS${N}                  ${C}║${N}"
+      echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+      echo -e "${C}║${N}  Username    : ${G}$CHK_USER${N}"
+      echo -e "${C}║${N}  Status      : $STATUS"
+      echo -e "${C}║${N}  Online      : ${G}$ONLINE session(s)${N}"
+      echo -e "${C}║${N}  Max Session : ${G}$MAXSESS${N}"
+      echo -e "${C}║${N}  Expires     : ${G}$EXP${N}"
+      echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+      echo -e "${C}║${N}  Host        : ${G}$HOST${N}"
+      echo -e "${C}║${N}  SSH Port    : ${G}22, 80, 443${N}"
+      echo -e "${C}║${N}  WS Port     : ${G}8080${N}"
+      echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+      press_enter
+    else
+      echo -e "\n${R} [!] Invalid option!${N}"
+      sleep 1
+    fi
+  done
+}
+
+# ══════════════════════════════════════════════
+#   LIST USERS
+# ══════════════════════════════════════════════
+
+list_users() {
+  clear
+  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+  echo -e "${C}║${N}          ${W}ALL SSH ACCOUNTS${N}                  ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  printf "${C}║${N}  %-15s %-22s %-6s\n" "Username" "Expires" "Online"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  COUNT=0
+  while IFS=: read -r user _ uid _ _ _ _; do
+    if [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
+      EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+      EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
+      NOW_S=$(date +%s)
+      # Only show active accounts
+      if [ "$EXP" == "never" ] || [ "$EXP_S" -gt "$NOW_S" ] 2>/dev/null; then
+        ONLINE=$(ps aux | grep -c "sshd: $user@" 2>/dev/null || echo 0)
+        printf "${C}║${N}  ${G}%-15s${N} %-22s %-6s\n" "$user" "$EXP" "$ONLINE"
+        COUNT=$((COUNT + 1))
+      fi
+    fi
+  done < /etc/passwd
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  Total: ${G}$COUNT account(s)${N}"
+  echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+  press_enter
+}
+
+# ══════════════════════════════════════════════
+#   WEBSOCKET STATUS
+# ══════════════════════════════════════════════
+
+ws_status() {
+  clear
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}         WEBSOCKET / PROXY STATUS            ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo ""
+  for PORT in 8080; do
+    STATUS=$(systemctl is-active ws-proxy-${PORT} 2>/dev/null)
+    if [ "$STATUS" == "active" ]; then
+      echo -e " Port ${PORT}  : ${G}● Running${N}"
+    else
+      echo -e " Port ${PORT}  : ${R}✗ Stopped${N}"
+    fi
+  done
+  echo ""
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e " ${W}HTTP Custom / HTTP Injector Config:${N}"
+  echo -e " Host    : ${G}$HOST${N}"
+  echo -e " Port    : ${G}80 or 443 or 8080${N}"
+  echo -e " Payload : ${G}GET / HTTP/1.1[crlf]Host: $HOST[crlf]Upgrade: websocket[crlf][crlf]${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  press_enter
+}
+
+# ══════════════════════════════════════════════
+#   CHECK SERVICES
+# ══════════════════════════════════════════════
+
+check_services() {
+  clear
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}             ⚡ SERVICE STATUS ⚡                  ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo ""
+  svc_check() {
+    STATUS=$(systemctl is-active $1 2>/dev/null)
+    if [ "$STATUS" == "active" ]; then
+      echo -e "${G}✓ [WORKING]${N}"
+    else
+      echo -e "${R}✗ [NOT WORKING]${N}"
+    fi
+  }
+  svc_check_sslh() {
+    S1=$(systemctl is-active sslh 2>/dev/null)
+    S2=$(systemctl is-active sslh-select 2>/dev/null)
+    if [ "$S1" == "active" ] || [ "$S2" == "active" ]; then
+      echo -e "${G}✓ [WORKING]${N}"
+    else
+      echo -e "${R}✗ [NOT WORKING]${N}"
+    fi
+  }
+  echo -e " SSH             - $(svc_check ssh)"
+  echo -e " SSL             - $(svc_check stunnel4)"
+  echo -e " MULTIPLEXER     - $(svc_check_sslh)"
+  echo -e " NGINX           - $(svc_check nginx)"
+  echo -e " DNSTT           - $(svc_check dnstt)"
+  echo -e " WEBSOCKET       - $(svc_check ws-proxy-8080)"
+  echo -e " XRAY            - $(svc_check xray)"
+  echo ""
+  press_enter
+}
+
+# ══════════════════════════════════════════════
+#   RESTART SERVICES
+# ══════════════════════════════════════════════
+
+restart_services() {
+  clear
+  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+  echo -e "${C}║${N}          ${W}RESTARTING SERVICES${N}               ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo ""
+  # Kill apache2 if running — it conflicts with sslh on port 80/443
+  systemctl stop apache2 > /dev/null 2>&1
+  systemctl disable apache2 > /dev/null 2>&1
+  systemctl mask apache2 > /dev/null 2>&1
+  DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y apache2 apache2-* > /dev/null 2>&1
+  fuser -k 80/tcp > /dev/null 2>&1
+  fuser -k 443/tcp > /dev/null 2>&1
+  systemctl restart ssh > /dev/null 2>&1
+  echo -e " ${G}[✓]${N} SSH restarted"
+  systemctl stop stunnel4 > /dev/null 2>&1
+  sleep 1
+  systemctl start stunnel4 > /dev/null 2>&1
+  echo -e " ${G}[✓]${N} SSL (stunnel4) restarted"
+  systemctl restart nginx > /dev/null 2>&1
+  echo -e " ${G}[✓]${N} Nginx restarted"
+  sleep 2
+  systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
+  echo -e " ${G}[✓]${N} Multiplexer restarted"
+  systemctl restart dnstt > /dev/null 2>&1
+  echo -e " ${G}[✓]${N} DNSTT restarted"
+  systemctl restart ws-proxy-8080 > /dev/null 2>&1
+  echo -e " ${G}[✓]${N} WebSocket restarted"
+  systemctl restart xray > /dev/null 2>&1
+  echo -e " ${G}[✓]${N} Xray/V2Ray restarted"
+  echo ""
+  echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+  press_enter
+}
+
+# ══════════════════════════════════════════════
+#   V2RAY MENU
+# ══════════════════════════════════════════════
+
+v2ray_menu() {
+  while true; do
+    clear
+    V2RAY_STATUS=$(systemctl is-active xray 2>/dev/null || echo "not-installed")
+    if [ "$V2RAY_STATUS" == "active" ]; then
+      V2RAY_DOT="${G}RUNNING${N}"
+    else
+      V2RAY_DOT="${R}STOPPED${N}"
+    fi
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}           ${W}V2RAY MANAGEMENT${N}                  ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  Status  : $V2RAY_DOT"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} Create Account                       ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[2]${N} Delete Account                       ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[3]${N} Check Account                        ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                    ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Option >>> " V2OPT
+    case $V2OPT in
+      1) v2ray_create_user ;;
+      2) v2ray_delete_user ;;
+      3) v2ray_check_user ;;
+      0) break ;;
+      *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════
+#   V2RAY INSTALL
+# ══════════════════════════════════════════════
+
+v2ray_install() {
+  clear
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}           INSTALLING V2RAY/XRAY              ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo ""
+  echo -e " ${Y}[*] Downloading and installing V2Ray...${N}"
+  bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
+  echo -e " ${G}[✓] V2Ray binary installed${N}"
+
+  mkdir -p /usr/local/etc/xray /etc/xray
+  touch /etc/xray/accounts.db
+
+  # Write base config with all protocols on internal ports
+  cat > /usr/local/etc/xray/config.json << CFGEOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 10086,
+      "listen": "127.0.0.1",
+      "protocol": "vmess",
+      "settings": {
+        "clients": []
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/vmess"
+        }
+      }
+    },
+    {
+      "port": 10087,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/vless"
+        }
+      }
+    },
+    {
+      "port": 10088,
+      "listen": "127.0.0.1",
+      "protocol": "trojan",
+      "settings": {
+        "clients": []
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/trojan"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+CFGEOF
+
+  echo -e " ${G}[✓] V2Ray config written (VMess/VLESS/Trojan on 10086-10088)${N}"
+
+  # Update sslh to route WS/HTTP traffic to all xray ports
+  SSLH_CFG="/etc/sslh/sslh.cfg"
+  if [ -f "$SSLH_CFG" ]; then
+    cat > "$SSLH_CFG" << 'SSLHEOF'
+foreground: true;
+inetd: false;
+numeric: false;
+transparent: false;
+timeout: 5;
+user: "sslh";
+pidfile: "/var/run/sslh/sslh.pid";
+
+listen:
+(
+  { host: "0.0.0.0"; port: "80"; },
+  { host: "0.0.0.0"; port: "443"; }
+);
+
+protocols:
+(
+  { name: "ssh";     host: "127.0.0.1"; port: "22";    log_level: 0; },
+  { name: "tls";     host: "127.0.0.1"; port: "7443";  log_level: 0; },
+  { name: "http";    host: "127.0.0.1"; port: "10086"; log_level: 0; },
+  { name: "http";    host: "127.0.0.1"; port: "8080";  log_level: 0; },
+  { name: "anyprot"; host: "127.0.0.1"; port: "10086"; log_level: 0; }
+);
+SSLHEOF
+    systemctl restart sslh > /dev/null 2>&1
+    echo -e " ${G}[✓] sslh updated — Xray now accessible on ports 80, 443${N}"
+  fi
+
+  systemctl enable xray > /dev/null 2>&1
+  systemctl start xray > /dev/null 2>&1
+  sleep 2
+
+  if systemctl is-active --quiet xray; then
+    echo -e " ${G}[✓] V2Ray running! Accessible via sslh on ports 80, 443${N}"
+  else
+    echo -e " ${R}[!] V2Ray failed to start. Check: journalctl -u xray${N}"
+  fi
+  echo ""
+  press_enter
+}
+
+# ══════════════════════════════════════════════
+#   V2RAY CREATE USER (protocol picker)
+# ══════════════════════════════════════════════
+
+v2ray_create_user() {
+  while true; do
+    clear
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${W}            Create V2Ray User                ${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e " ${W}[1]${N} VLESS"
+    echo -e " ${W}[2]${N} VMess"
+    echo -e " ${W}[3]${N} trojan"
+    echo -e " ${W}[0]${N} Return"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    read -p " Option: " PROTO_OPT
+    case $PROTO_OPT in
+      1) v2ray_create_account "vless"        ;;
+      2) v2ray_create_account "vmess"        ;;
+      3) v2ray_create_account "trojan"       ;;
+      0) break ;;
+      *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════
+#   V2RAY CREATE ACCOUNT (per protocol)
+# ══════════════════════════════════════════════
+
+v2ray_create_account() {
+  PROTO="$1"
+  source "$CONFIG_FILE"
+  clear
+  DATETIME=$(date "+%b %d, %Y %I:%M:%S %p")
+  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+  echo -e "${C}║${N}        ${W}Create ${PROTO^^} Account${N}               ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  Time : ${G}$DATETIME${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+
+  if [ "$PROTO" == "trojan" ]; then
+    read -p "  Enter password: " V2_PASSWORD
+    read -p "  Expiration (days): " V2_DAYS
+    V2_USER="trojan_$(date +%s | tail -c 11 | tr -d '\n')"
+    V2_UUID="$V2_PASSWORD"
+    if [ -z "$V2_PASSWORD" ] || [ -z "$V2_DAYS" ]; then
+      echo -e "\n${R} [!] All fields are required!${N}"
+      sleep 2; return
+    fi
+  else
+    read -p "  Enter username: " V2_USER
+    read -p "  Expiration (days): " V2_DAYS
+    V2_UUID="$V2_USER"
+    if [ -z "$V2_USER" ] || [ -z "$V2_DAYS" ]; then
+      echo -e "\n${R} [!] All fields are required!${N}"
+      sleep 2; return
+    fi
+    if grep -q "^$V2_USER " /etc/xray/accounts.db 2>/dev/null; then
+      echo -e "\n${R} [!] User '$V2_USER' already exists!${N}"
+      sleep 2; return
+    fi
+  fi
+
+  V2_EXPIRY=$(date -d "+${V2_DAYS} days" +"%Y-%m-%d %H:%M:%S")
+  V2_EXPIRY_FULL=$(date -d "+${V2_DAYS} days" "+%Y-%m-%d %H:%M:%S")
+  SERVER_IP=$(hostname -I | awk '{print $1}')
+
+  # Determine internal port and path based on protocol
+  case $PROTO in
+    vless)  V2_PORT=10087; V2_PATH="/vless"  ;;
+    vmess)  V2_PORT=10086; V2_PATH="/vmess"  ;;
+    trojan) V2_PORT=10088; V2_PATH="/trojan" ;;
+  esac
+  V2_PUBLIC_PORTS="80, 443"
+
+  # Save to accounts db
+  echo "$V2_USER $V2_UUID $V2_EXPIRY $PROTO" >> /etc/xray/accounts.db
+
+  # Inject client into the matching inbound in config.json
+  python3 - << PYEOF
+import json, sys
+path = '/usr/local/etc/xray/config.json'
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except:
+    cfg = {"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom"}]}
+
+proto = "$PROTO"
+uuid  = "$V2_UUID"
+user  = "$V2_USER"
+port  = int("$V2_PORT")
+path_ws = "$V2_PATH"
+
+# Check if matching inbound exists
+found = False
+for inb in cfg.get('inbounds', []):
+    if inb.get('protocol') == proto:
+        clients = inb['settings'].get('clients', [])
+        if proto == 'trojan':
+            clients.append({"password": uuid, "email": user})
+        else:
+            clients.append({"id": uuid, "alterId": 0, "email": user})
+        inb['settings']['clients'] = clients
+        found = True
+        break
+
+if not found:
+    if proto == 'trojan':
+        new_inb = {
+            "port": port, "listen": "127.0.0.1", "protocol": proto,
+            "settings": {"clients": [{"password": uuid, "email": user}]},
+            "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws}}
+        }
+    else:
+        new_inb = {
+            "port": port, "listen": "127.0.0.1", "protocol": proto,
+            "settings": {"clients": [{"id": uuid, "alterId": 0, "email": user}]},
+            "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws}}
+        }
+    cfg.setdefault('inbounds', []).append(new_inb)
+
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+print("OK")
+PYEOF
+
+  systemctl restart xray > /dev/null 2>&1
+
+  # Accurate expiry countdown
+  NOW_S=$(date +%s)
+  EXP_S=$(date -d "$V2_EXPIRY_FULL" +%s 2>/dev/null || date -d "$V2_EXPIRY" +%s)
+  SECS_TOTAL=$(( EXP_S - NOW_S ))
+  DAYS_LEFT=$(( SECS_TOTAL / 86400 ))
+  HRS_LEFT=$(( (SECS_TOTAL % 86400) / 3600 ))
+  MINS_LEFT=$(( (SECS_TOTAL % 3600) / 60 ))
+  SECS_LEFT=$(( SECS_TOTAL % 60 ))
+
+  # Build connection links based on protocol
+  if [ "$PROTO" == "trojan" ]; then
+    LINK_TLS="trojan://${V2_UUID}@${HOST}:443?type=ws&security=tls&host=${HOST}&path=${V2_PATH}&sni=${HOST}#${V2_UUID}"
+    LINK_NTLS="trojan://${V2_UUID}@${HOST}:80?type=ws&host=${HOST}&path=${V2_PATH}#${V2_UUID}"
+  elif [ "$PROTO" == "vless" ]; then
+    LINK_TLS="vless://${V2_UUID}@${HOST}:443?encryption=none&type=ws&security=tls&host=${HOST}&path=${V2_PATH}&sni=${HOST}#${V2_USER}"
+    LINK_NTLS="vless://${V2_UUID}@${HOST}:80?encryption=none&type=ws&host=${HOST}&path=${V2_PATH}#${V2_USER}"
+  else
+    VMESS_JSON="{\"v\":\"2\",\"ps\":\"${V2_USER}\",\"add\":\"${HOST}\",\"port\":\"443\",\"id\":\"${V2_UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"${V2_PATH}\",\"tls\":\"tls\",\"sni\":\"${HOST}\"}"
+    VMESS_JSON2="{\"v\":\"2\",\"ps\":\"${V2_USER}\",\"add\":\"${HOST}\",\"port\":\"80\",\"id\":\"${V2_UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"${V2_PATH}\",\"tls\":\"\"}"
+    LINK_TLS="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
+    LINK_NTLS="vmess://$(echo -n "$VMESS_JSON2" | base64 -w 0)"
+  fi
+
+  clear
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}        ${PROTO^^} USER CREATED                 ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  if [ "$PROTO" == "trojan" ]; then
+  echo -e " Password    : ${G}$V2_UUID${N}"
+  else
+  echo -e " Username    : ${G}$V2_USER${N}"
+  fi
+  echo -e " Expiration  : ${G}${DAYS_LEFT} days${N}"
+  echo -e " Expire Date : ${G}$V2_EXPIRY_FULL${N}"
+  echo -e " Expires in  : ${G}${DAYS_LEFT}d ${HRS_LEFT}h ${MINS_LEFT}m ${SECS_LEFT}s${N}"
+  echo -e " Domain      : ${G}$HOST${N}"
+  echo -e " SNI         : ${G}$HOST${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e " TLS (443):"
+  echo -e " ${G}${LINK_TLS}${N}"
+  echo ""
+  echo -e " Non-TLS (80):"
+  echo -e " ${G}${LINK_NTLS}${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  press_enter
+}
+
+# ══════════════════════════════════════════════
+#   V2RAY DELETE USER
+# ══════════════════════════════════════════════
+
+v2ray_delete_user() {
+  while true; do
+    clear
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${W}           Delete V2Ray User                 ${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e " ${W}[1]${N} VLESS"
+    echo -e " ${W}[2]${N} VMess"
+    echo -e " ${W}[3]${N} Trojan"
+    echo -e " ${W}[0]${N} Return"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    read -p " Option: " PROTO_DEL
+    case $PROTO_DEL in
+      1) v2ray_delete_by_proto "vless"  ;;
+      2) v2ray_delete_by_proto "vmess"  ;;
+      3) v2ray_delete_by_proto "trojan" ;;
+      0) break ;;
+      *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
+    esac
+  done
+}
+
+v2ray_delete_by_proto() {
+  FILTER_PROTO="$1"
+  while true; do
+    clear
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${W}        DELETE ${FILTER_PROTO^^} USER                  ${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+
+    VACCS=()
+    IDX=1
+
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      vuser=$(echo "$line" | awk '{print $1}')
+      vuuid=$(echo "$line" | awk '{print $2}')
+      NCOLS=$(echo "$line" | awk '{print NF}')
+      if [ "$NCOLS" -ge 5 ]; then
+        vexpiry=$(echo "$line" | awk '{print $3" "$4}')
+        vproto=$(echo "$line" | awk '{print $5}')
+      else
+        vexpiry=$(echo "$line" | awk '{print $3}')
+        vproto=$(echo "$line" | awk '{print $4}')
+      fi
+      if [ "$vproto" == "$FILTER_PROTO" ]; then
+        SECS_LEFT=$(( $(date -d "$vexpiry" +%s 2>/dev/null || echo 0) - $(date +%s) ))
+        if [ $SECS_LEFT -le 0 ]; then
+          TIME_LEFT="${R}EXPIRED${N}"
+        else
+          D=$(( SECS_LEFT/86400 ))
+          H=$(( (SECS_LEFT%86400)/3600 ))
+          M=$(( (SECS_LEFT%3600)/60 ))
+          TIME_LEFT="${G}${D}d ${H}h ${M}m${N}"
+        fi
+        # Show password for trojan, username for others
+        if [ "$FILTER_PROTO" == "trojan" ]; then
+          DISPLAY_NAME="$vuuid"
+        else
+          DISPLAY_NAME="$vuser"
+        fi
+        echo -e " ${W}[$IDX]${N} $DISPLAY_NAME  ($TIME_LEFT)"
+        VACCS+=("$vuser:$vuuid:$vexpiry:$vproto")
+        IDX=$((IDX + 1))
+      fi
+    done < /etc/xray/accounts.db
+
+    if [ ${#VACCS[@]} -eq 0 ]; then
+      echo -e " ${Y} No ${FILTER_PROTO^^} accounts found.${N}"
+      press_enter; return
+    fi
+
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e " ${W}[e]${N} Remove all expired ${FILTER_PROTO^^} users"
+    echo -e " ${W}[A]${N} Remove all ${FILTER_PROTO^^} users (force)"
+    echo -e " ${W}[0]${N} Return"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    read -p " Option: " DOPT
+
+    if [ "$DOPT" == "0" ]; then
+      break
+    elif [ "$DOPT" == "e" ]; then
+      COUNT=0
+      TODAY=$(date +%Y-%m-%d)
+      while read -r vuser vuuid vexpiry vproto; do
+        if [ "$vproto" == "$FILTER_PROTO" ] && [[ "$vexpiry" < "$TODAY" ]]; then
+          sed -i "/^$vuser /d" /etc/xray/accounts.db
+          COUNT=$((COUNT+1))
+        fi
+      done < /etc/xray/accounts.db
+      systemctl restart xray > /dev/null 2>&1
+      echo -e "\n ${G}[✓] Removed $COUNT expired ${FILTER_PROTO^^} users!${N}"
+      sleep 2
+    elif [ "$DOPT" == "A" ]; then
+      while read -r vuser vuuid vexpiry vproto; do
+        if [ "$vproto" == "$FILTER_PROTO" ]; then
+          sed -i "/^$vuser /d" /etc/xray/accounts.db
+        fi
+      done < /etc/xray/accounts.db
+      # Remove all clients from this inbound in config
+      python3 - << PYEOF
+import json
+path = '/usr/local/etc/xray/config.json'
+with open(path) as f:
+    cfg = json.load(f)
+for inb in cfg.get('inbounds', []):
+    if inb.get('protocol') == '$FILTER_PROTO':
+        inb['settings']['clients'] = []
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+PYEOF
+      systemctl restart xray > /dev/null 2>&1
+      echo -e "\n ${G}[✓] All ${FILTER_PROTO^^} users removed!${N}"
+      sleep 2
+    elif [[ "$DOPT" =~ ^[0-9]+$ ]] && [ "$DOPT" -ge 1 ] && [ "$DOPT" -lt "$IDX" ]; then
+      TARGET="${VACCS[$((DOPT - 1))]}"
+      DEL_USER=$(echo "$TARGET" | cut -d: -f1)
+      DEL_UUID=$(echo "$TARGET" | cut -d: -f2)
+      DEL_PROTO=$(echo "$TARGET" | cut -d: -f4)
+
+      sed -i "/^$DEL_USER /d" /etc/xray/accounts.db
+
+      python3 - << PYEOF
+import json
+path = '/usr/local/etc/xray/config.json'
+with open(path) as f:
+    cfg = json.load(f)
+proto = "$DEL_PROTO"
+uuid  = "$DEL_UUID"
+for inb in cfg.get('inbounds', []):
+    if inb.get('protocol') == proto:
+        clients = inb['settings'].get('clients', [])
+        if proto in ['vless', 'vmess']:
+            inb['settings']['clients'] = [c for c in clients if c.get('id') != uuid]
+        else:
+            inb['settings']['clients'] = [c for c in clients if c.get('password') != uuid]
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+PYEOF
+      systemctl restart xray > /dev/null 2>&1
+      echo -e "\n ${G}[✓] User '$DEL_USER' deleted!${N}"
+      sleep 2
+    else
+      echo -e "\n${R} [!] Invalid option!${N}"
+      sleep 1
+    fi
+  done
+}
+
+# ══════════════════════════════════════════════
+#   V2RAY CHECK USER
+# ══════════════════════════════════════════════
+
+v2ray_check_user() {
+  while true; do
+    clear
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${W}           Check V2Ray Users                 ${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e " ${W}[1]${N} VLESS"
+    echo -e " ${W}[2]${N} VMess"
+    echo -e " ${W}[3]${N} Trojan"
+    echo -e " ${W}[0]${N} Return"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    read -p " Option: " PROTO_CHK
+    case $PROTO_CHK in
+      1) v2ray_check_by_proto "vless"  ;;
+      2) v2ray_check_by_proto "vmess"  ;;
+      3) v2ray_check_by_proto "trojan" ;;
+      0) break ;;
+      *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
+    esac
+  done
+}
+
+v2ray_check_by_proto() {
+  FILTER_PROTO="$1"
+  source "$CONFIG_FILE"
+  clear
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${W}           ${FILTER_PROTO^^} USERS                      ${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo ""
+
+  FOUND=0
+  TODAY_S=$(date +%s)
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    vuser=$(echo "$line" | awk '{print $1}')
+    vuuid=$(echo "$line" | awk '{print $2}')
+    NCOLS=$(echo "$line" | awk '{print NF}')
+    if [ "$NCOLS" -ge 5 ]; then
+      vexpiry=$(echo "$line" | awk '{print $3" "$4}')
+      vproto=$(echo "$line" | awk '{print $5}')
+    else
+      vexpiry=$(echo "$line" | awk '{print $3}')
+      vproto=$(echo "$line" | awk '{print $4}')
+    fi
+
+    if [ "$vproto" == "$FILTER_PROTO" ]; then
+      FOUND=1
+      EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null || echo 0)
+      SECS_LEFT=$(( EXP_S - TODAY_S ))
+      if [ $SECS_LEFT -le 0 ]; then
+        TIME_LEFT="EXPIRED"
+      else
+        D=$(( SECS_LEFT/86400 ))
+        H=$(( (SECS_LEFT%86400)/3600 ))
+        M=$(( (SECS_LEFT%3600)/60 ))
+        S=$(( SECS_LEFT%60 ))
+        TIME_LEFT="${D}d ${H}h ${M}m ${S}s"
+      fi
+
+      # Trojan uses password as remarks, vless/vmess use username
+      if [ "$FILTER_PROTO" == "trojan" ]; then
+        LINK_TLS="trojan://${vuuid}@${HOST}:443?type=ws&security=tls&host=${HOST}&path=/trojan&sni=${HOST}#${vuuid}"
+        LINK_NTLS="trojan://${vuuid}@${HOST}:80?type=ws&host=${HOST}&path=/trojan#${vuuid}"
+        echo -e " Password   : ${G}$vuuid${N}"
+      elif [ "$FILTER_PROTO" == "vless" ]; then
+        LINK_TLS="vless://${vuuid}@${HOST}:443?encryption=none&type=ws&security=tls&host=${HOST}&path=/vless&sni=${HOST}#${vuser}"
+        LINK_NTLS="vless://${vuuid}@${HOST}:80?encryption=none&type=ws&host=${HOST}&path=/vless#${vuser}"
+        echo -e " Username   : ${G}$vuser${N}"
+      else
+        VMESS_TLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${HOST}\",\"port\":\"443\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${HOST}\"}"
+        VMESS_NTLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${HOST}\",\"port\":\"80\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"/vmess\",\"tls\":\"\"}"
+        LINK_TLS="vmess://$(echo -n "$VMESS_TLS" | base64 -w 0)"
+        LINK_NTLS="vmess://$(echo -n "$VMESS_NTLS" | base64 -w 0)"
+        echo -e " Username   : ${G}$vuser${N}"
+      fi
+
+      echo -e " Expiration : ${G}$TIME_LEFT${N}"
+      echo -e " TLS (443)  :"
+      echo -e " ${G}$LINK_TLS${N}"
+      echo ""
+      echo -e " NON TLS (80):"
+      echo -e " ${G}$LINK_NTLS${N}"
+      echo -e " ${C}════════════════════════════════════════════════${N}"
+      echo ""
+    fi
+  done < /etc/xray/accounts.db
+
+  if [ $FOUND -eq 0 ]; then
+    echo -e " ${Y} No ${FILTER_PROTO^^} accounts found.${N}"
+  fi
+
+  press_enter
+}
+
+# ══════════════════════════════════════════════
+#   MAIN
+# ══════════════════════════════════════════════
+
+check_root
+check_os
+check_password
+load_config
+main_menu
