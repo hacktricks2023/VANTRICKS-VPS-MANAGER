@@ -1,14 +1,16 @@
+
 #!/bin/bash
 # ==================================================================
-#   All-In-One VPS Multi-Protocol Setup & Manager Script
-#   OS Support: Debian, Ubuntu, CentOS, AlmaLinux, Rocky, Fedora
-#   Protocols: DNSTT + WA + SSH + XHTTP + VMess + VLess + Trojan + OVPN
+# All-In-One VPS Multi-Protocol Setup & Manager Script
+# OS Support: Debian, Ubuntu, CentOS, AlmaLinux, Rocky, Fedora
+# Protocols: DNSTT + WA + SSH + XHTTP + VMess + VLess + Trojan + OVPN
 # ==================================================================
 
 # Directory & Base Setup
 cd /root
 mkdir -p /etc/xray /etc/v2ray /var/lib/
 touch /etc/xray/domain /etc/v2ray/domain /etc/xray/scdomain /etc/v2ray/scdomain /root/scdomain /root/domain
+touch /var/log/vps_expired.log
 
 # Colors
 R='\033[0;31m'
@@ -26,7 +28,7 @@ CONFIG_FILE="/etc/vps_script.conf"
 START_TIME=$(date +%s)
 
 # ══════════════════════════════════════════════
-#   PRE-FLIGHT & OS COMPATIBILITY CHECKS
+# PRE-FLIGHT & OS COMPATIBILITY CHECKS
 # ══════════════════════════════════════════════
 
 if [ "${EUID}" -ne 0 ]; then
@@ -92,6 +94,18 @@ press_enter() {
   read -p " Press Enter to continue... "
 }
 
+post_creation_menu() {
+  echo -e ""
+  echo -e " [1] Back to Main Menu"
+  echo -e " [0] Exit"
+  read -p " Choose : " pc_ch
+  case $pc_ch in
+    1) main_menu ;;
+    0) exit 0 ;;
+    *) main_menu ;;
+  esac
+}
+
 load_config() {
   if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
@@ -120,41 +134,62 @@ get_info() {
 
 auto_remove_expired() {
   local NOW_S=$(date +%s)
+  local LOG_FILE="/var/log/vps_expired.log"
+  
+  # Check SSH Expirations (Lock account instead of deleting)
   while IFS=: read -r user _ uid _ _ _ _; do
     if [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
       EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
       if [ "$EXP" != "never" ] && [ -n "$EXP" ] && [ "$EXP" != "password must be changed" ]; then
         EXP_S=$(date -d "$EXP" +%s 2>/dev/null)
         if [ -n "$EXP_S" ] && [ "$EXP_S" -lt "$NOW_S" ]; then
-          sed -i "/Match User $user/,/MaxSessions/d" /etc/ssh/sshd_config 2>/dev/null
-          userdel -r "$user" > /dev/null 2>&1
+          # Lock user and log reminder
+          usermod -L "$user" > /dev/null 2>&1
+          if ! grep -q "SSH User $user expired" "$LOG_FILE" 2>/dev/null; then
+            echo "$(date): SSH User $user expired. Contact vantricks to renew your account." >> "$LOG_FILE"
+          fi
         fi
       fi
     fi
   done < /etc/passwd
 
+  # Check Xray Expirations (Remove from active config, keep in DB for records)
   if [ -f /etc/xray/accounts.db ]; then
-    TMP=$(mktemp)
-    while IFS= read -r line; do
-      [ -z "$line" ] && continue
-      vexpiry=$(echo "$line" | awk '{print $3}')
-      EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null)
-      if [ -n "$EXP_S" ] && [ "$EXP_S" -gt "$NOW_S" ]; then
-        echo "$line" >> "$TMP"
-      fi
-    done < /etc/xray/accounts.db
-    mv "$TMP" /etc/xray/accounts.db
+    python3 -c "
+import json, time, datetime
+with open('/usr/local/etc/xray/config.json', 'r') as f: data = json.load(f)
+valid_users = []
+try:
+    with open('/etc/xray/accounts.db', 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 3:
+                user, exp = parts[1], parts[2]
+                try:
+                    exp_s = int(datetime.datetime.strptime(exp, '%Y-%m-%d').timestamp())
+                    if exp_s > time.time():
+                        valid_users.append(user)
+                    else:
+                        with open('/var/log/vps_expired.log', 'a') as log:
+                            log.write(f'{datetime.datetime.now()}: Xray User {user} expired. Contact vantricks to renew your account.\n')
+                except: pass
+except: pass
+for ib in data['inbounds']:
+    if 'settings' in ib and 'clients' in ib['settings']:
+        ib['settings']['clients'] = [c for c in ib['settings']['clients'] if c.get('email') in valid_users]
+with open('/usr/local/etc/xray/config.json', 'w') as f: json.dump(data, f, indent=2)
+"
     systemctl restart xray > /dev/null 2>&1
   fi
 }
 
 # ══════════════════════════════════════════════
-#   DOMAIN & INITIAL SETUP
+# DOMAIN & INITIAL SETUP
 # ══════════════════════════════════════════════
 
 first_run_setup() {
   clear
-  echo -e "$BBlue                     SETUP DOMAIN VPS     $NC"
+  echo -e "$BBlue SETUP DOMAIN VPS $NC"
   echo -e "$BYellow----------------------------------------------------------$NC"
   echo -e "$BGreen 1. Use Domain Random / Gunakan Domain Random $NC"
   echo -e "$BGreen 2. Choose Your Own Domain / Gunakan Domain Sendiri $NC"
@@ -191,7 +226,7 @@ first_run_setup() {
 }
 
 # ══════════════════════════════════════════════
-#   PROTOCOL INSTALLERS
+# PROTOCOL INSTALLERS
 # ══════════════════════════════════════════════
 
 install_golang() {
@@ -684,7 +719,7 @@ CFGEOF
 install_all() {
   clear
   echo -e "${BGreen}=====================================================${NC}"
-  echo -e "${BGreen}            STARTING ALL PROTOCOLS INSTALLATION      ${NC}"
+  echo -e "${BGreen} STARTING ALL PROTOCOLS INSTALLATION ${NC}"
   echo -e "${BGreen}=====================================================${NC}"
 
   # Stop HTTP conflicts
@@ -741,7 +776,7 @@ SVCEOF
 }
 
 # ══════════════════════════════════════════════
-#   SUMMARY BANNER
+# SUMMARY BANNER
 # ══════════════════════════════════════════════
 
 print_installation_summary() {
@@ -749,30 +784,30 @@ print_installation_summary() {
   SERVER_IP=$(hostname -I | awk '{print $1}')
   
   echo "==================================================================" | tee -a /root/log-install.txt
-  echo "      ___                                    ___         ___      " | tee -a /root/log-install.txt
-  echo "     /  /\        ___           ___         /  /\       /__/\     " | tee -a /root/log-install.txt
-  echo "    /  /:/_      /  /\         /__/\       /  /::\      \  \:\    " | tee -a /root/log-install.txt
-  echo "   /  /:/ /\    /  /:/         \  \:\     /  /:/\:\      \  \:\   " | tee -a /root/log-install.txt
-  echo "  /  /:/_/::\  /__/::\          \  \:\   /  /:/~/:/  _____\__\:\  " | tee -a /root/log-install.txt
-  echo " /__/:/__\/\:\ \__\/\:\__   ___  \__\:\ /__/:/ /:/  /__/::::::::\ " | tee -a /root/log-install.txt
+  echo " ___ ___ ___ " | tee -a /root/log-install.txt
+  echo " / /\ ___ ___ / /\ /__/\ " | tee -a /root/log-install.txt
+  echo " / /:/_ / /\ /__/\ / /::\ \ \:\ " | tee -a /root/log-install.txt
+  echo " / /:/ /\ / /:/ \ \:\ / /:/\:\ \ \:\ " | tee -a /root/log-install.txt
+  echo " / /:/_/::\ /__/::\ \ \:\ / /:/~/:/ _____\__\:\ " | tee -a /root/log-install.txt
+  echo " /__/:/__\/\:\ \__\/\:\__ ___ \__\:\ /__/:/ /:/ /__/::::::::\ " | tee -a /root/log-install.txt
   echo "==================================================================" | tee -a /root/log-install.txt
   echo "" | tee -a /root/log-install.txt
-  echo "   >>> Services & Ports" | tee -a /root/log-install.txt
-  echo "   - OpenSSH                  : 22" | tee -a /root/log-install.txt
-  echo "   - SSH Websocket            : 80, 8080" | tee -a /root/log-install.txt
-  echo "   - SSH SSL Websocket        : 443" | tee -a /root/log-install.txt
-  echo "   - Stunnel4                 : 7443" | tee -a /root/log-install.txt
-  echo "   - XHTTP Proxy              : 8000" | tee -a /root/log-install.txt
-  echo "   - DNSTT Server             : 53 (UDP)" | tee -a /root/log-install.txt
-  echo "   - OpenVPN UDP              : 1194" | tee -a /root/log-install.txt
-  echo "   - Nginx Reverse Proxy      : 8880" | tee -a /root/log-install.txt
-  echo "   - Vmess / Vless / Trojan   : 80, 443 (WS)" | tee -a /root/log-install.txt
+  echo " >>> Services & Ports" | tee -a /root/log-install.txt
+  echo " - OpenSSH : 22" | tee -a /root/log-install.txt
+  echo " - SSH Websocket : 80, 8080" | tee -a /root/log-install.txt
+  echo " - SSH SSL Websocket : 443" | tee -a /root/log-install.txt
+  echo " - Stunnel4 : 7443" | tee -a /root/log-install.txt
+  echo " - XHTTP Proxy : 8000" | tee -a /root/log-install.txt
+  echo " - DNSTT Server : 53 (UDP)" | tee -a /root/log-install.txt
+  echo " - OpenVPN UDP : 1194" | tee -a /root/log-install.txt
+  echo " - Nginx Reverse Proxy : 8880" | tee -a /root/log-install.txt
+  echo " - Vmess / Vless / Trojan : 80, 443 (WS)" | tee -a /root/log-install.txt
   echo "" | tee -a /root/log-install.txt
-  echo "   >>> Configuration" | tee -a /root/log-install.txt
-  echo "   - Domain Host              : ${HOST}" | tee -a /root/log-install.txt
-  echo "   - Nameserver (NS)          : ${NAMESERVER}" | tee -a /root/log-install.txt
-  echo "   - DNSTT Public Key         : ${DNSTT_PUBKEY}" | tee -a /root/log-install.txt
-  echo "   - OpenVPN Client Config    : /root/client.ovpn" | tee -a /root/log-install.txt
+  echo " >>> Configuration" | tee -a /root/log-install.txt
+  echo " - Domain Host : ${HOST}" | tee -a /root/log-install.txt
+  echo " - Nameserver (NS) : ${NAMESERVER}" | tee -a /root/log-install.txt
+  echo " - DNSTT Public Key : ${DNSTT_PUBKEY}" | tee -a /root/log-install.txt
+  echo " - OpenVPN Client Config : /root/client.ovpn" | tee -a /root/log-install.txt
   echo "==================================================================" | tee -a /root/log-install.txt
   echo "" | tee -a /root/log-install.txt
   
@@ -783,7 +818,7 @@ print_installation_summary() {
 }
 
 # ══════════════════════════════════════════════
-#   MANAGEMENT MENUS
+# MANAGEMENT MENUS
 # ══════════════════════════════════════════════
 
 main_menu() {
@@ -791,18 +826,18 @@ main_menu() {
   get_info
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${NC}"
-  echo -e "${C}║${NC}         ${W}VPS Protocol Manager - Main${NC}         ${C}║${NC}"
+  echo -e "${C}║${NC} ${W}VPS Protocol Manager - Main${NC} ${C}║${NC}"
   echo -e "${C}╠══════════════════════════════════════════════╣${NC}"
-  echo -e "${C}║${NC}  OS          : $OS"
-  echo -e "${C}║${NC}  RAM         : $RAM_USED MB / $RAM_TOTAL MB ($RAM_PERCENT%)"
-  echo -e "${C}║${NC}  CPU Load    : $CPU_LOAD%"
-  echo -e "${C}║${NC}  Active Users: $TOTAL_ACCOUNTS"
+  echo -e "${C}║${NC} OS : $OS"
+  echo -e "${C}║${NC} RAM : $RAM_USED MB / $RAM_TOTAL MB ($RAM_PERCENT%)"
+  echo -e "${C}║${NC} CPU Load : $CPU_LOAD%"
+  echo -e "${C}║${NC} Active Users: $TOTAL_ACCOUNTS"
   echo -e "${C}╠══════════════════════════════════════════════╣${NC}"
-  echo -e "${C}║${NC}  ${W}[1]${NC} SSH & OpenVPN Management"
-  echo -e "${C}║${NC}  ${W}[2]${NC} Xray Management (VMess/VLess/Trojan)"
-  echo -e "${C}║${NC}  ${W}[3]${NC} Server Options & Service Controls"
-  echo -e "${C}║${NC}  ${W}[4]${NC} XHTTP Payload Generator"
-  echo -e "${C}║${NC}  ${W}[0]${NC} Exit Menu"
+  echo -e "${C}║${NC} ${W}[1]${NC} SSH & OpenVPN Management"
+  echo -e "${C}║${NC} ${W}[2]${NC} Xray Management (VMess/VLess/Trojan)"
+  echo -e "${C}║${NC} ${W}[3]${NC} Server Options & Service Controls"
+  echo -e "${C}║${NC} ${W}[4]${NC} XHTTP Payload Generator"
+  echo -e "${C}║${NC} ${W}[0]${NC} Exit Menu"
   echo -e "${C}╚══════════════════════════════════════════════╝${NC}"
   read -p " Choose option : " choice
 
@@ -819,13 +854,13 @@ main_menu() {
 ssh_menu() {
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${NC}"
-  echo -e "${C}║${NC}           ${W}SSH / OVPN Management${NC}              ${C}║${NC}"
+  echo -e "${C}║${NC} ${W}SSH / OVPN Management${NC} ${C}║${NC}"
   echo -e "${C}╠══════════════════════════════════════════════╣${NC}"
-  echo -e "  [1] Create Account"
-  echo -e "  [2] Delete Account"
-  echo -e "  [3] List Accounts"
-  echo -e "  [4] Renew Account"
-  echo -e "  [0] Back"
+  echo -e " [1] Create Account"
+  echo -e " [2] Delete Account"
+  echo -e " [3] List Accounts"
+  echo -e " [4] Renew Account"
+  echo -e " [0] Back"
   read -p " Choose : " ch
   case $ch in
     1) create_ssh ;;
@@ -839,6 +874,9 @@ ssh_menu() {
 
 create_ssh() {
   clear
+  source "$CONFIG_FILE"
+  SERVER_IP=$(hostname -I | awk '{print $1}')
+  
   read -p " Username : " user
   id "$user" &>/dev/null && { echo -e "${R}User exists!${NC}"; press_enter; ssh_menu; }
   read -p " Password : " pass
@@ -849,13 +887,32 @@ create_ssh() {
   useradd -m -s /bin/false -e "$exp" "$user"
   echo "$user:$pass" | chpasswd
   echo "Match User $user" >> /etc/ssh/sshd_config
-  echo "  MaxSessions $limit" >> /etc/ssh/sshd_config
+  echo " MaxSessions $limit" >> /etc/ssh/sshd_config
   systemctl restart ssh > /dev/null 2>&1
 
-  echo -e "${G}SSH Account Created Successfully!${NC}"
-  echo -e "User: $user | Pass: $pass | Exp: $exp"
-  press_enter
-  ssh_menu
+  clear
+  echo -e "${G}=======================================${NC}"
+  echo -e "${G} SSH Account Created Successfully! ${NC}"
+  echo -e "${G}=======================================${NC}"
+  echo -e " Username : $user"
+  echo -e " Password : $pass"
+  echo -e " Expired On : $exp"
+  echo -e " Limit Login : $limit IP"
+  echo -e " Host/IP : ${HOST} / ${SERVER_IP}"
+  echo -e " SSH Port : 22"
+  echo -e " WS Port : 80, 8080"
+  echo -e " WS SSL Port : 443"
+  echo -e " Stunnel Port : 7443"
+  echo -e " XHTTP Port : 8000"
+  echo -e " OVPN Port : 1194 (UDP)"
+  echo -e " DNSTT Port : 53 (UDP)"
+  echo -e " DNSTT PubKey : ${DNSTT_PUBKEY}"
+  echo -e "======================================="
+  echo -e " Payload WS : GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]Upgrade: websocket[crlf][crlf]"
+  echo -e " Payload XHTTP : GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]X-Online-Host: ${HOST}[crlf]Connection: Keep-Alive[crlf][crlf]"
+  echo -e "======================================="
+  
+  post_creation_menu
 }
 
 delete_ssh() {
@@ -875,11 +932,25 @@ delete_ssh() {
 
 list_ssh() {
   clear
+  echo -e "${C}========================================================================${NC}"
+  echo -e "${W} SSH Account List ${NC}"
+  echo -e "${C}========================================================================${NC}"
+  NOW_S=$(date +%s)
   awk -F: '$3>=1000 && $1!="nobody"' /etc/passwd | while read line; do
     u=$(echo $line | cut -d: -f1)
-    e=$(chage -l $u | grep "Account expires" | cut -d: -f2)
-    printf " %-15s %s\n" "$u" "$e"
+    e=$(chage -l $u | grep "Account expires" | cut -d: -f2 | xargs)
+    if [ "$e" != "never" ] && [ -n "$e" ] && [ "$e" != "password must be changed" ]; then
+      EXP_S=$(date -d "$e" +%s 2>/dev/null)
+      if [ -n "$EXP_S" ] && [ "$EXP_S" -lt "$NOW_S" ]; then
+        printf " %-15s %-12s ${R}[EXPIRED] - Contact vantricks to renew your account${NC}\n" "$u" "$e"
+      else
+        printf " %-15s %-12s ${G}[ACTIVE]${NC}\n" "$u" "$e"
+      fi
+    else
+      printf " %-15s %-12s ${G}[ACTIVE]${NC}\n" "$u" "$e"
+    fi
   done
+  echo -e "${C}========================================================================${NC}"
   press_enter
   ssh_menu
 }
@@ -891,7 +962,8 @@ renew_ssh() {
     read -p " Extend (Days) : " days
     exp=$(date -d "+$days days" +"%Y-%m-%d")
     chage -E "$exp" "$user"
-    echo -e "${G}Account renewed until $exp.${NC}"
+    usermod -U "$user" 2>/dev/null # Unlocks the account if it was locked by auto-expire
+    echo -e "${G}Account renewed until $exp and unlocked.${NC}"
   else
     echo -e "${R}User not found.${NC}"
   fi
@@ -902,13 +974,13 @@ renew_ssh() {
 xray_menu() {
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${NC}"
-  echo -e "${C}║${NC}             ${W}Xray Management${NC}                  ${C}║${NC}"
+  echo -e "${C}║${NC} ${W}Xray Management${NC} ${C}║${NC}"
   echo -e "${C}╠══════════════════════════════════════════════╣${NC}"
-  echo -e "  [1] Create VMess Account"
-  echo -e "  [2] Delete Xray Account"
-  echo -e "  [3] List Xray Accounts"
-  echo -e "  [4] Renew Xray Account"
-  echo -e "  [0] Back"
+  echo -e " [1] Create VMess Account"
+  echo -e " [2] Delete Xray Account"
+  echo -e " [3] List Xray Accounts"
+  echo -e " [4] Renew Xray Account"
+  echo -e " [0] Back"
   read -p " Choose : " ch
   case $ch in
     1) create_vmess ;;
@@ -923,6 +995,7 @@ xray_menu() {
 create_vmess() {
   clear
   source "$CONFIG_FILE"
+  SERVER_IP=$(hostname -I | awk '{print $1}')
   read -p " Username : " user
   read -p " Expire (Days) : " days
   uuid=$(cat /proc/sys/kernel/random/uuid)
@@ -949,10 +1022,22 @@ EOF
   link="vmess://$(cat /tmp/vmcfg.json | base64 -w 0)"
   rm -f /tmp/vmcfg.json
 
-  echo -e "${G}VMess Account Created!${NC}"
-  echo -e " Link: ${link}"
-  press_enter
-  xray_menu
+  clear
+  echo -e "${G}=======================================${NC}"
+  echo -e "${G} VMess Account Created Successfully! ${NC}"
+  echo -e "${G}=======================================${NC}"
+  echo -e " Username : $user"
+  echo -e " Expired On : $exp"
+  echo -e " Host/IP : ${HOST} / ${SERVER_IP}"
+  echo -e " Port TLS : 443"
+  echo -e " Port Non-TLS : 80"
+  echo -e " Path : /vmess"
+  echo -e " UUID : $uuid"
+  echo -e "======================================="
+  echo -e " VMess Link : ${link}"
+  echo -e "======================================="
+  
+  post_creation_menu
 }
 
 delete_xray() {
@@ -964,7 +1049,8 @@ delete_xray() {
 import json
 with open('/usr/local/etc/xray/config.json', 'r') as f: data = json.load(f)
 for ib in data['inbounds']:
-    ib['settings']['clients'] = [c for c in ib['settings']['clients'] if c.get('email') != '$user']
+    if 'clients' in ib.get('settings', {}):
+        ib['settings']['clients'] = [c for c in ib['settings']['clients'] if c.get('email') != '$user']
 with open('/usr/local/etc/xray/config.json', 'w') as f: json.dump(data, f, indent=2)
 "
     systemctl restart xray > /dev/null 2>&1
@@ -978,7 +1064,21 @@ with open('/usr/local/etc/xray/config.json', 'w') as f: json.dump(data, f, inden
 
 list_xray() {
   clear
-  [ -f /etc/xray/accounts.db ] && cat /etc/xray/accounts.db
+  echo -e "${C}========================================================================${NC}"
+  echo -e "${W} Xray Account List ${NC}"
+  echo -e "${C}========================================================================${NC}"
+  NOW_S=$(date +%s)
+  if [ -f /etc/xray/accounts.db ]; then
+    while read -r proto u e uuid; do
+      EXP_S=$(date -d "$e" +%s 2>/dev/null)
+      if [ -n "$EXP_S" ] && [ "$EXP_S" -lt "$NOW_S" ]; then
+        printf " %-7s %-12s %-12s ${R}[EXPIRED] - Contact vantricks to renew your account${NC}\n" "$proto" "$u" "$e"
+      else
+        printf " %-7s %-12s %-12s ${G}[ACTIVE]${NC}\n" "$proto" "$u" "$e"
+      fi
+    done < /etc/xray/accounts.db
+  fi
+  echo -e "${C}========================================================================${NC}"
   press_enter
   xray_menu
 }
@@ -1003,12 +1103,12 @@ renew_xray() {
 server_menu() {
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${NC}"
-  echo -e "${C}║${NC}             ${W}Server Actions${NC}                   ${C}║${NC}"
+  echo -e "${C}║${NC} ${W}Server Actions${NC} ${C}║${NC}"
   echo -e "${C}╠══════════════════════════════════════════════╣${NC}"
-  echo -e "  [1] Restart All Services"
-  echo -e "  [2] Fix DNS Configuration"
-  echo -e "  [3] Reboot Server"
-  echo -e "  [0] Back"
+  echo -e " [1] Restart All Services"
+  echo -e " [2] Fix DNS Configuration"
+  echo -e " [3] Reboot Server"
+  echo -e " [0] Back"
   read -p " Choose : " ch
   case $ch in
     1)
@@ -1042,7 +1142,7 @@ xhttp_payload_menu() {
 }
 
 # ══════════════════════════════════════════════
-#   EXECUTION ROUTER
+# EXECUTION ROUTER
 # ══════════════════════════════════════════════
 
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -1051,3 +1151,4 @@ else
   load_config
   main_menu
 fi
+
