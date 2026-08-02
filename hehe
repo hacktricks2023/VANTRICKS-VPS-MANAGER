@@ -1,1053 +1,300 @@
+
 #!/bin/bash
-# ==================================================================
-#   All-In-One VPS Multi-Protocol Setup & Manager Script
-#   OS Support: Debian, Ubuntu, CentOS, AlmaLinux, Rocky, Fedora
-#   Protocols: DNSTT + WA + SSH + XHTTP + VMess + VLess + Trojan + OVPN
-# ==================================================================
-
-# Directory & Base Setup
-cd /root
-mkdir -p /etc/xray /etc/v2ray /var/lib/
-touch /etc/xray/domain /etc/v2ray/domain /etc/xray/scdomain /etc/v2ray/scdomain /root/scdomain /root/domain
-
-# Colors
-R='\033[0;31m'
-G='\033[1;32m'
-Y='\033[1;33m'
-C='\033[1;36m'
-W='\033[1;37m'
-BRed='\e[1;31m'
-BGreen='\e[1;32m'
-BYellow='\e[1;33m'
-BBlue='\e[1;34m'
-NC='\033[0m'
-
-CONFIG_FILE="/etc/vps_script.conf"
-START_TIME=$(date +%s)
-
-# ══════════════════════════════════════════════
-#   PRE-FLIGHT & OS COMPATIBILITY CHECKS
-# ══════════════════════════════════════════════
-
-if [ "${EUID}" -ne 0 ]; then
-  echo -e "${R}Error: You must run this script as root.${NC}"
-  exit 1
-fi
-
-if [ "$(systemd-detect-virt 2>/dev/null)" == "openvz" ]; then
-  echo -e "${R}OpenVZ is not supported. VPS with KVM/VMWare virtualization ONLY.${NC}"
-  exit 1
-fi
-
-detect_os() {
-  if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS_FAMILY=$ID
-    OS_LIKE=${ID_LIKE:-$ID}
-  else
-    echo -e "${R}[ERROR] Unable to detect Operating System.${NC}"
-    exit 1
-  fi
-
-  if command -v apt-get &>/dev/null; then
-    PKG_TYPE="apt"
-  elif command -v dnf &>/dev/null; then
-    PKG_TYPE="dnf"
-  elif command -v yum &>/dev/null; then
-    PKG_TYPE="yum"
-  else
-    echo -e "${R}[ERROR] Unsupported package manager! Only APT and YUM/DNF are supported.${NC}"
-    exit 1
-  fi
-}
-detect_os
-
-pkg_install() {
-  if [ "$PKG_TYPE" = "apt" ]; then
-    DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1
-  else
-    $PKG_TYPE update -y >/dev/null 2>&1
-    $PKG_TYPE install -y "$@" >/dev/null 2>&1
-  fi
-}
-
-# Local IP & Hostname Setup
-localip=$(hostname -I | awk '{print $1}')
-hst=$(hostname)
-dart=$(grep -w "$hst" /etc/hosts 2>/dev/null | awk '{print $2}')
-if [[ "$hst" != "$dart" ]]; then
-  echo "$localip $(hostname)" >> /etc/hosts
-fi
-
-# Timezone Setup
-ln -fs /usr/share/zoneinfo/Asia/Jakarta /etc/localtime 2>/dev/null || timedatectl set-timezone Asia/Jakarta >/dev/null 2>&1
-
-secs_to_human() {
-  echo "Installation time : $(( ${1} / 3600 )) hours $(( (${1} / 60) % 60 )) minutes $(( ${1} % 60 )) seconds"
-}
-
-press_enter() {
-  echo ""
-  read -p " Press Enter to continue... "
-}
-
-load_config() {
-  if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-  else
-    first_run_setup
-  fi
-}
-
-get_info() {
-  OS=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')
-  RAM_TOTAL=$(free -m | awk '/Mem:/ {print $2}')
-  RAM_USED=$(free -m | awk '/Mem:/ {print $3}')
-  RAM_FREE=$(free -m | awk '/Mem:/ {print $4}')
-  RAM_PERCENT=$(awk "BEGIN {printf \"%.2f\", ($RAM_USED/$RAM_TOTAL)*100}")
-  DATETIME=$(TZ="Asia/Jakarta" date "+%m-%d-%Y %I:%M:%S %p")
-  SSH_ONLINE=$(ss -tnp 2>/dev/null | grep -c "sshd") || SSH_ONLINE=0
-  SSH_ACCOUNTS=$(awk -F: '$3>=1000 && $1!="nobody"' /etc/passwd | wc -l | tr -d '[:space:]')
-  V2RAY_ACCOUNTS=0
-  if [ -f /etc/xray/accounts.db ]; then
-    V2RAY_ACCOUNTS=$(grep -c '[^[:space:]]' /etc/xray/accounts.db 2>/dev/null | tr -d '[:space:]')
-  fi
-  TOTAL_ACCOUNTS=$(( ${SSH_ACCOUNTS} + ${V2RAY_ACCOUNTS} ))
-  CPU_LOAD=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "0")
-  SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-}
-
-auto_remove_expired() {
-  local NOW_S=$(date +%s)
-  while IFS=: read -r user _ uid _ _ _ _; do
-    if [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
-      EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
-      if [ "$EXP" != "never" ] && [ -n "$EXP" ] && [ "$EXP" != "password must be changed" ]; then
-        EXP_S=$(date -d "$EXP" +%s 2>/dev/null)
-        if [ -n "$EXP_S" ] && [ "$EXP_S" -lt "$NOW_S" ]; then
-          sed -i "/Match User $user/,/MaxSessions/d" /etc/ssh/sshd_config 2>/dev/null
-          userdel -r "$user" > /dev/null 2>&1
-        fi
-      fi
-    fi
-  done < /etc/passwd
-
-  if [ -f /etc/xray/accounts.db ]; then
-    TMP=$(mktemp)
-    while IFS= read -r line; do
-      [ -z "$line" ] && continue
-      vexpiry=$(echo "$line" | awk '{print $3}')
-      EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null)
-      if [ -n "$EXP_S" ] && [ "$EXP_S" -gt "$NOW_S" ]; then
-        echo "$line" >> "$TMP"
-      fi
-    done < /etc/xray/accounts.db
-    mv "$TMP" /etc/xray/accounts.db
-    systemctl restart xray > /dev/null 2>&1
-  fi
-}
-
-# ══════════════════════════════════════════════
-#   DOMAIN & INITIAL SETUP
-# ══════════════════════════════════════════════
-
-first_run_setup() {
-  clear
-  echo -e "$BBlue                     SETUP DOMAIN VPS     $NC"
-  echo -e "$BYellow----------------------------------------------------------$NC"
-  echo -e "$BGreen 1. Use Domain Random / Gunakan Domain Random $NC"
-  echo -e "$BGreen 2. Choose Your Own Domain / Gunakan Domain Sendiri $NC"
-  echo -e "$BYellow----------------------------------------------------------$NC"
-  read -rp " Input 1 or 2 : " dns
-  if [ "$dns" -eq 1 ]; then
-    curl -sL https://autoscript.caliphdev.com/ssh/cf.sh | bash
-    INPUT_HOST=$(cat /etc/xray/domain 2>/dev/null)
-  elif [ "$dns" -eq 2 ]; then
-    read -rp " Enter Your Domain : " dom
-    INPUT_HOST="$dom"
-    echo "IP=$dom" > /var/lib/ipvps.conf
-    echo "$dom" > /root/scdomain
-    echo "$dom" > /etc/xray/scdomain
-    echo "$dom" > /etc/xray/domain
-    echo "$dom" > /etc/v2ray/domain
-    echo "$dom" > /root/domain
-  else 
-    echo "Invalid Selection"
-    exit 1
-  fi
-
-  read -p " Enter NS Domain for DNSTT (e.g. ns.domain.com): " INPUT_NS
-  [ -z "$INPUT_NS" ] && INPUT_NS="ns.${INPUT_HOST}"
-
-  INPUT_PUBKEY=$(head /dev/urandom | tr -dc 'a-f0-9' | head -c 64)
-  
-  echo "HOST=$INPUT_HOST" > "$CONFIG_FILE"
-  echo "NAMESERVER=$INPUT_NS" >> "$CONFIG_FILE"
-  echo "PUBKEY=$INPUT_PUBKEY" >> "$CONFIG_FILE"
-  source "$CONFIG_FILE"
-  
-  install_all
-}
-
-# ══════════════════════════════════════════════
-#   PROTOCOL INSTALLERS
-# ══════════════════════════════════════════════
-
-install_golang() {
-  echo -e "${Y}[*] Installing Golang...${NC}"
-  wget -q "https://go.dev/dl/go1.22.5.linux-amd64.tar.gz" -O /tmp/go.tar.gz
-  rm -rf /usr/local/go
-  tar -C /usr/local -xzf /tmp/go.tar.gz > /dev/null 2>&1
-  export PATH=$PATH:/usr/local/go/bin
-}
-
-install_custom_openssh() {
-  echo -e "${Y}[*] Installing Custom OpenSSH...${NC}"
-  if [ "$PKG_TYPE" = "apt" ]; then
-    pkg_install build-essential zlib1g-dev libssl-dev libpam0g-dev libselinux1-dev libedit-dev autoconf
-  else
-    pkg_install gcc make zlib-devel openssl-devel pam-devel libselinux-devel libedit-devel autoconf
-  fi
-
-  OPENSSH_VER="9.2p1"
-  cd /tmp
-  wget -q "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VER}.tar.gz" -O openssh-src.tar.gz 2>/dev/null
-  tar -xzf openssh-src.tar.gz > /dev/null 2>&1
-  cd openssh-${OPENSSH_VER}
-  sed -i 's/#define SSH_VERSION.*/#define SSH_VERSION "Blu-2026-SSH"/' version.h
-  sed -i 's/#define SSH_PORTABLE.*/#define SSH_PORTABLE ""/' version.h
-  ./configure --prefix=/usr --sysconfdir=/etc/ssh --with-pam > /dev/null 2>&1
-  make -j$(nproc) > /dev/null 2>&1
-  systemctl stop ssh 2>/dev/null || systemctl stop sshd 2>/dev/null || true
-  install -m 755 sshd /usr/sbin/sshd
-  mkdir -p /var/empty /run/sshd
-  useradd -r -s /sbin/nologin -d /var/empty sshd > /dev/null 2>&1 || true
-
-  cat > /etc/systemd/system/ssh.service << 'SVCEOF'
-[Unit]
-Description=SSH Tunneling Server
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/sbin/sshd -D
-ExecReload=/bin/kill -HUP $MAINPID
-KillMode=process
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-SVCEOF
-
-  systemctl daemon-reload > /dev/null 2>&1
-  systemctl enable ssh > /dev/null 2>&1
-  systemctl start ssh > /dev/null 2>&1
-}
-
-install_websocket() {
-  echo -e "${Y}[*] Installing WebSocket Proxy (Port 8080)...${NC}"
-  cat > /usr/local/bin/ws-proxy.py << 'PYEOF'
-#!/usr/bin/env python3
-import socket, threading, select, sys
-LISTEN_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-SSH_HOST, SSH_PORT, NGINX_PORT = '127.0.0.1', 22, 8880
-BUFFER, TIMEOUT = 65535, 60
-V2RAY_PATHS = [b'/vmess', b'/vless', b'/trojan']
-RESPONSE_COLOR = b"HTTP/1.1 101 <font color=#00FF00>Custom-SSH</font>\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
-RESPONSE_PLAIN = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
-
-def forward(src, dst):
-    try:
-        while True:
-            r, _, _ = select.select([src], [], [], TIMEOUT)
-            if r:
-                d = src.recv(BUFFER)
-                if not d: break
-                dst.sendall(d)
-    except: pass
-    finally:
-        try: src.close()
-        except: pass
-        try: dst.close()
-        except: pass
-
-def handle(client):
-    try:
-        data = client.recv(BUFFER)
-        if not data: client.close(); return
-        is_v2ray = False
-        is_http = data[:4] in (b'GET ', b'POST', b'HEAD', b'CONN')
-        is_ws = b'Upgrade: websocket' in data or b'upgrade: websocket' in data
-        if is_http:
-            for path in V2RAY_PATHS:
-                if path in data: is_v2ray = True; break
-        if is_v2ray:
-            target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target.connect((SSH_HOST, NGINX_PORT))
-            target.sendall(data)
-            threading.Thread(target=forward, args=(client, target), daemon=True).start()
-            threading.Thread(target=forward, args=(target, client), daemon=True).start()
-        elif is_http and not is_ws:
-            client.send(RESPONSE_PLAIN)
-            client.close()
-            return
-        else:
-            target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target.connect((SSH_HOST, SSH_PORT))
-            if is_http: client.send(RESPONSE_COLOR)
-            else: target.sendall(data)
-            threading.Thread(target=forward, args=(client, target), daemon=True).start()
-            threading.Thread(target=forward, args=(target, client), daemon=True).start()
-    except:
-        try: client.close()
-        except: pass
-
-def start(port):
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(('0.0.0.0', port))
-    srv.listen(200)
-    while True:
-        try:
-            c, _ = srv.accept()
-            threading.Thread(target=handle, args=(c,), daemon=True).start()
-        except: pass
-
-if __name__ == '__main__':
-    start(LISTEN_PORT)
-PYEOF
-  chmod +x /usr/local/bin/ws-proxy.py
-
-  cat > /etc/systemd/system/ws-proxy-8080.service << EOF
-[Unit]
-Description=WebSocket Proxy
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 /usr/local/bin/ws-proxy.py 8080
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl enable ws-proxy-8080 > /dev/null 2>&1
-  systemctl start ws-proxy-8080 > /dev/null 2>&1
-}
-
-install_xhttp() {
-  echo -e "${Y}[*] Installing XHTTP Proxy (Port 8000)...${NC}"
-  cat > /usr/local/bin/xhttp-proxy.py << 'PYEOF'
-#!/usr/bin/env python3
-import socket, threading, select
-LISTEN_PORT, SSH_HOST, SSH_PORT = 8000, '127.0.0.1', 22
-BUFFER, TIMEOUT = 65535, 60
-RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n"
-
-def forward(src, dst):
-    try:
-        while True:
-            r, _, _ = select.select([src], [], [], TIMEOUT)
-            if r:
-                d = src.recv(BUFFER)
-                if not d: break
-                dst.sendall(d)
-    except: pass
-    finally:
-        try: src.close()
-        except: pass
-        try: dst.close()
-        except: pass
-
-def handle(client):
-    try:
-        data = client.recv(BUFFER)
-        if not data: client.close(); return
-        target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        target.connect((SSH_HOST, SSH_PORT))
-        if data.startswith(b'GET') or data.startswith(b'POST') or data.startswith(b'HTTP'):
-            client.send(RESPONSE)
-        else:
-            target.sendall(data)
-        threading.Thread(target=forward, args=(client, target), daemon=True).start()
-        threading.Thread(target=forward, args=(target, client), daemon=True).start()
-    except:
-        try: client.close()
-        except: pass
-
-def start(port):
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(('0.0.0.0', port))
-    srv.listen(200)
-    while True:
-        try:
-            c, _ = srv.accept()
-            threading.Thread(target=handle, args=(c,), daemon=True).start()
-        except: pass
-
-if __name__ == '__main__':
-    start(LISTEN_PORT)
-PYEOF
-  chmod +x /usr/local/bin/xhttp-proxy.py
-
-  cat > /etc/systemd/system/xhttp-proxy.service << EOF
-[Unit]
-Description=XHTTP Proxy
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 /usr/local/bin/xhttp-proxy.py
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl enable xhttp-proxy > /dev/null 2>&1
-  systemctl start xhttp-proxy > /dev/null 2>&1
-}
-
-install_nginx() {
-  echo -e "${Y}[*] Installing Nginx Reverse Proxy...${NC}"
-  pkg_install nginx
-  rm -f /etc/nginx/sites-enabled/default 2>/dev/null
-
-  cat > /etc/nginx/conf.d/v2ray.conf << 'NGINXEOF'
-server {
-    listen 8880;
-    server_name _;
-
-    location /vmess {
-        proxy_pass http://127.0.0.1:10086;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-    location /vless {
-        proxy_pass http://127.0.0.1:10087;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-    location /trojan {
-        proxy_pass http://127.0.0.1:10088;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-    }
-}
-NGINXEOF
-  systemctl enable nginx > /dev/null 2>&1
-  systemctl restart nginx > /dev/null 2>&1
-}
-
-install_ssl() {
-  echo -e "${Y}[*] Installing SSL & SSLH Multiplexer...${NC}"
-  if [ "$PKG_TYPE" = "apt" ]; then
-    pkg_install stunnel4 sslh certbot
-  else
-    pkg_install stunnel sslh certbot
-  fi
-
-  mkdir -p /etc/stunnel
-  fuser -k 80/tcp > /dev/null 2>&1 || true
-  
-  if certbot certonly --standalone -d "$HOST" --non-interactive --agree-tos -m "admin@${HOST}" --http-01-port 80 > /dev/null 2>&1; then
-    cat > /etc/stunnel/stunnel.conf << EOF
-cert = /etc/letsencrypt/live/${HOST}/fullchain.pem
-key = /etc/letsencrypt/live/${HOST}/privkey.pem
-socket = a:SO_REUSEADDR=1
-foreground = yes
-
-[ssl-all]
-accept = 127.0.0.1:7443
-connect = 127.0.0.1:8080
-EOF
-  else
-    openssl req -new -x509 -days 3650 -nodes -out /etc/stunnel/stunnel.pem -keyout /etc/stunnel/stunnel.pem -subj "/CN=VPS" > /dev/null 2>&1
-    chmod 600 /etc/stunnel/stunnel.pem
-    cat > /etc/stunnel/stunnel.conf << 'EOF'
-cert = /etc/stunnel/stunnel.pem
-socket = a:SO_REUSEADDR=1
-foreground = yes
-
-[ssl-all]
-accept = 127.0.0.1:7443
-connect = 127.0.0.1:8080
-EOF
-  fi
-
-  cat > /etc/systemd/system/stunnel4.service << 'SEOF'
-[Unit]
-Description=SSL Tunnel
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/stunnel /etc/stunnel/stunnel.conf
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-SEOF
-  systemctl daemon-reload > /dev/null 2>&1
-  systemctl enable stunnel4 > /dev/null 2>&1
-  systemctl restart stunnel4 > /dev/null 2>&1
-
-  mkdir -p /var/run/sslh /etc/sslh
-  cat > /etc/systemd/system/sslh.service << 'SSLHEOF'
-[Unit]
-Description=SSL/SSH Multiplexer
-After=network.target
-
-[Service]
-ExecStart=/usr/sbin/sslh -f -p 0.0.0.0:80 -p 0.0.0.0:443 --ssh 127.0.0.1:22 --tls 127.0.0.1:7443 --http 127.0.0.1:8880 --anyprot 127.0.0.1:8080
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-SSLHEOF
-
-  systemctl daemon-reload > /dev/null 2>&1
-  systemctl enable sslh > /dev/null 2>&1
-  systemctl restart sslh > /dev/null 2>&1
-}
-
-install_dnstt() {
-  echo -e "${Y}[*] Installing DNSTT Server...${NC}"
-  pkg_install unzip
-  wget -q "https://www.bamsoftware.com/software/dnstt/dnstt-20220208.zip" -O /tmp/dnstt.zip
-  cd /tmp && unzip -o dnstt.zip > /dev/null 2>&1
-  cd /tmp/dnstt-20220208/dnstt-server
-  /usr/local/go/bin/go build . > /dev/null 2>&1
-  cp dnstt-server /usr/local/bin/dnstt-server
-  chmod +x /usr/local/bin/dnstt-server
-
-  /usr/local/bin/dnstt-server -gen-key -privkey-file /etc/dnstt-priv.key -pubkey-file /etc/dnstt-pub.key > /dev/null 2>&1
-  DNSTT_PUBKEY=$(cat /etc/dnstt-pub.key 2>/dev/null | tr -d '\n')
-  sed -i '/^DNSTT_PUBKEY/d' "$CONFIG_FILE"
-  echo "DNSTT_PUBKEY=$DNSTT_PUBKEY" >> "$CONFIG_FILE"
-
-  cat > /usr/local/bin/dnstt-start.sh << EOF
-#!/bin/bash
-exec /usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/dnstt-priv.key ${NAMESERVER} 127.0.0.1:80
-EOF
-  chmod +x /usr/local/bin/dnstt-start.sh
-
-  cat > /etc/systemd/system/dnstt.service << 'EOF'
-[Unit]
-Description=DNSTT DNS Tunnel Server
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/dnstt-start.sh
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl stop systemd-resolved > /dev/null 2>&1 || true
-  systemctl disable systemd-resolved > /dev/null 2>&1 || true
-  rm -f /etc/resolv.conf
-  echo "nameserver 8.8.8.8" > /etc/resolv.conf
-  echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-  chattr +i /etc/resolv.conf 2>/dev/null || true
-
-  systemctl daemon-reload > /dev/null 2>&1
-  systemctl enable dnstt > /dev/null 2>&1
-  systemctl start dnstt > /dev/null 2>&1
-}
-
-install_ovpn() {
-  echo -e "${Y}[*] Installing OpenVPN Server...${NC}"
-  pkg_install openvpn iptables easy-rsa
-
-  make-cadir /etc/openvpn/easy-rsa
-  cd /etc/openvpn/easy-rsa
-  ./easyrsa init-pki > /dev/null 2>&1
-  EASYRSA_BATCH=1 ./easyrsa build-ca nopass > /dev/null 2>&1
-  EASYRSA_BATCH=1 ./easyrsa gen-req server nopass > /dev/null 2>&1
-  EASYRSA_BATCH=1 ./easyrsa sign-req server server > /dev/null 2>&1
-  EASYRSA_BATCH=1 ./easyrsa gen-dh > /dev/null 2>&1
-  openvpn --genkey secret ta.key > /dev/null 2>&1
-
-  cp pki/ca.crt pki/issued/server.crt pki/private/server.key pki/dh.pem ta.key /etc/openvpn/
-
-  PLUGIN_PATH=$(find /usr/lib* -name "openvpn-plugin-auth-pam.so" | head -n 1)
-
-  cat > /etc/openvpn/server.conf << EOF
-port 1194
-proto udp
-dev tun
-ca ca.crt
-cert server.crt
-key server.key
-dh dh.pem
-plugin $PLUGIN_PATH login
-verify-client-cert none
-username-as-common-name
-server 10.8.0.0 255.255.255.0
-ifconfig-pool-persist ipp.txt
-push "redirect-gateway def1 bypass-dhcp"
-push "dhcp-option DNS 8.8.8.8"
-push "dhcp-option DNS 8.8.4.4"
-keepalive 10 120
-cipher AES-256-CBC
-user nobody
-group nogroup
-persist-key
-persist-tun
-status openvpn-status.log
-verb 3
-EOF
-
-  sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/g' /etc/sysctl.conf
-  sysctl -p > /dev/null 2>&1
-
-  IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-  iptables -t nat -I POSTROUTING 1 -s 10.8.0.0/24 -o $IFACE -j MASQUERADE
-  iptables-save > /etc/iptables.up.rules
-
-  cat > /root/client.ovpn << OVPNCLI
-client
-dev tun
-proto udp
-remote ${SERVER_IP} 1194
-resolv-retry infinite
-nobind
-persist-key
-persist-tun
-auth-user-pass
-cipher AES-256-CBC
-auth SHA256
-verb 3
-<ca>
-$(cat /etc/openvpn/ca.crt)
-</ca>
-OVPNCLI
-
-  systemctl enable openvpn@server > /dev/null 2>&1
-  systemctl restart openvpn@server > /dev/null 2>&1
-}
-
-install_xray() {
-  echo -e "${Y}[*] Installing Xray Core...${NC}"
-  bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
-  mkdir -p /usr/local/etc/xray /etc/xray
-  touch /etc/xray/accounts.db
-
-  cat > /usr/local/etc/xray/config.json << CFGEOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "port": 10086, "listen": "127.0.0.1", "protocol": "vmess",
-      "settings": { "clients": [] },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "/vmess" } }
-    },
-    {
-      "port": 10087, "listen": "127.0.0.1", "protocol": "vless",
-      "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "/vless" } }
-    },
-    {
-      "port": 10088, "listen": "127.0.0.1", "protocol": "trojan",
-      "settings": { "clients": [] },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "/trojan" } }
-    }
-  ],
-  "outbounds": [{ "protocol": "freedom" }]
-}
-CFGEOF
-
-  systemctl daemon-reload > /dev/null 2>&1
-  systemctl enable xray > /dev/null 2>&1
-  systemctl restart xray > /dev/null 2>&1
-}
-
-install_all() {
-  clear
-  echo -e "${BGreen}=====================================================${NC}"
-  echo -e "${BGreen}            STARTING ALL PROTOCOLS INSTALLATION      ${NC}"
-  echo -e "${BGreen}=====================================================${NC}"
-
-  # Stop HTTP conflicts
-  systemctl stop apache2 >/dev/null 2>&1 || true
-  systemctl stop httpd >/dev/null 2>&1 || true
-
-  pkg_install curl wget python3 openssl net-tools psmisc git
-
-  install_golang
-  install_custom_openssh
-  install_websocket
-  install_xhttp
-  install_nginx
-  install_ssl
-  install_dnstt
-  install_ovpn
-  install_xray
-
-  # Menu Shortcuts
-  cp "$(realpath $0)" /root/setup.sh
-  chmod +x /root/setup.sh
-  cat > /usr/local/bin/menu << 'MENUCMD'
-#!/bin/bash
-bash /root/setup.sh
-MENUCMD
-  chmod +x /usr/local/bin/menu
-
-  # System Startup Service
-  cat > /usr/local/bin/vps-startup.sh << 'STARTEOF'
-#!/bin/bash
-fuser -k 80/tcp 443/tcp > /dev/null 2>&1 || true
-systemctl restart ssh stunnel4 nginx ws-proxy-8080 xhttp-proxy openvpn@server xray dnstt sslh > /dev/null 2>&1
-STARTEOF
-  chmod +x /usr/local/bin/vps-startup.sh
-
-  cat > /etc/systemd/system/vps-startup.service << 'SVCEOF'
-[Unit]
-Description=VPS Startup Service
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/vps-startup.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-SVCEOF
-  systemctl daemon-reload > /dev/null 2>&1
-  systemctl enable vps-startup > /dev/null 2>&1
-
-  clear
-  print_installation_summary
-}
-
-# ══════════════════════════════════════════════
-#   SUMMARY BANNER
-# ══════════════════════════════════════════════
-
-print_installation_summary() {
-  source "$CONFIG_FILE"
-  SERVER_IP=$(hostname -I | awk '{print $1}')
-  
-  echo "==================================================================" | tee -a /root/log-install.txt
-  echo "      ___                                    ___         ___      " | tee -a /root/log-install.txt
-  echo "     /  /\        ___           ___         /  /\       /__/\     " | tee -a /root/log-install.txt
-  echo "    /  /:/_      /  /\         /__/\       /  /::\      \  \:\    " | tee -a /root/log-install.txt
-  echo "   /  /:/ /\    /  /:/         \  \:\     /  /:/\:\      \  \:\   " | tee -a /root/log-install.txt
-  echo "  /  /:/_/::\  /__/::\          \  \:\   /  /:/~/:/  _____\__\:\  " | tee -a /root/log-install.txt
-  echo " /__/:/__\/\:\ \__\/\:\__   ___  \__\:\ /__/:/ /:/  /__/::::::::\ " | tee -a /root/log-install.txt
-  echo "==================================================================" | tee -a /root/log-install.txt
-  echo "" | tee -a /root/log-install.txt
-  echo "   >>> Services & Ports" | tee -a /root/log-install.txt
-  echo "   - OpenSSH                  : 22" | tee -a /root/log-install.txt
-  echo "   - SSH Websocket            : 80, 8080" | tee -a /root/log-install.txt
-  echo "   - SSH SSL Websocket        : 443" | tee -a /root/log-install.txt
-  echo "   - Stunnel4                 : 7443" | tee -a /root/log-install.txt
-  echo "   - XHTTP Proxy              : 8000" | tee -a /root/log-install.txt
-  echo "   - DNSTT Server             : 53 (UDP)" | tee -a /root/log-install.txt
-  echo "   - OpenVPN UDP              : 1194" | tee -a /root/log-install.txt
-  echo "   - Nginx Reverse Proxy      : 8880" | tee -a /root/log-install.txt
-  echo "   - Vmess / Vless / Trojan   : 80, 443 (WS)" | tee -a /root/log-install.txt
-  echo "" | tee -a /root/log-install.txt
-  echo "   >>> Configuration" | tee -a /root/log-install.txt
-  echo "   - Domain Host              : ${HOST}" | tee -a /root/log-install.txt
-  echo "   - Nameserver (NS)          : ${NAMESERVER}" | tee -a /root/log-install.txt
-  echo "   - DNSTT Public Key         : ${DNSTT_PUBKEY}" | tee -a /root/log-install.txt
-  echo "   - OpenVPN Client Config    : /root/client.ovpn" | tee -a /root/log-install.txt
-  echo "==================================================================" | tee -a /root/log-install.txt
-  echo "" | tee -a /root/log-install.txt
-  
-  secs_to_human "$(($(date +%s) - ${START_TIME}))" | tee -a /root/log-install.txt
-  echo ""
-  read -p "Press Enter to finish installation and reboot..."
-  reboot
-}
-
-# ══════════════════════════════════════════════
-#   MANAGEMENT MENUS
-# ══════════════════════════════════════════════
-
-main_menu() {
-  auto_remove_expired
-  get_info
-  clear
-  echo -e "${C}╔══════════════════════════════════════════════╗${NC}"
-  echo -e "${C}║${NC}         ${W}VPS Protocol Manager - Main${NC}         ${C}║${NC}"
-  echo -e "${C}╠══════════════════════════════════════════════╣${NC}"
-  echo -e "${C}║${NC}  OS          : $OS"
-  echo -e "${C}║${NC}  RAM         : $RAM_USED MB / $RAM_TOTAL MB ($RAM_PERCENT%)"
-  echo -e "${C}║${NC}  CPU Load    : $CPU_LOAD%"
-  echo -e "${C}║${NC}  Active Users: $TOTAL_ACCOUNTS"
-  echo -e "${C}╠══════════════════════════════════════════════╣${NC}"
-  echo -e "${C}║${NC}  ${W}[1]${NC} SSH & OpenVPN Management"
-  echo -e "${C}║${NC}  ${W}[2]${NC} Xray Management (VMess/VLess/Trojan)"
-  echo -e "${C}║${NC}  ${W}[3]${NC} Server Options & Service Controls"
-  echo -e "${C}║${NC}  ${W}[4]${NC} XHTTP Payload Generator"
-  echo -e "${C}║${NC}  ${W}[0]${NC} Exit Menu"
-  echo -e "${C}╚══════════════════════════════════════════════╝${NC}"
-  read -p " Choose option : " choice
-
-  case $choice in
-    1) ssh_menu ;;
-    2) xray_menu ;;
-    3) server_menu ;;
-    4) xhttp_payload_menu ;;
-    0) exit 0 ;;
-    *) main_menu ;;
-  esac
-}
-
-ssh_menu() {
-  clear
-  echo -e "${C}╔══════════════════════════════════════════════╗${NC}"
-  echo -e "${C}║${NC}           ${W}SSH / OVPN Management${NC}              ${C}║${NC}"
-  echo -e "${C}╠══════════════════════════════════════════════╣${NC}"
-  echo -e "  [1] Create Account"
-  echo -e "  [2] Delete Account"
-  echo -e "  [3] List Accounts"
-  echo -e "  [4] Renew Account"
-  echo -e "  [0] Back"
-  read -p " Choose : " ch
-  case $ch in
-    1) create_ssh ;;
-    2) delete_ssh ;;
-    3) list_ssh ;;
-    4) renew_ssh ;;
-    0) main_menu ;;
-    *) ssh_menu ;;
-  esac
-}
-
-create_ssh() {
-  clear
-  read -p " Username : " user
-  id "$user" &>/dev/null && { echo -e "${R}User exists!${NC}"; press_enter; ssh_menu; }
-  read -p " Password : " pass
-  read -p " Expire (Days) : " days
-  read -p " Multi-login limit : " limit
-
-  exp=$(date -d "+$days days" +"%Y-%m-%d")
-  useradd -m -s /bin/false -e "$exp" "$user"
-  echo "$user:$pass" | chpasswd
-  echo "Match User $user" >> /etc/ssh/sshd_config
-  echo "  MaxSessions $limit" >> /etc/ssh/sshd_config
-  systemctl restart ssh > /dev/null 2>&1
-
-  echo -e "${G}SSH Account Created Successfully!${NC}"
-  echo -e "User: $user | Pass: $pass | Exp: $exp"
-  press_enter
-  ssh_menu
-}
-
-delete_ssh() {
-  clear
-  read -p " Username to delete : " user
-  if id "$user" &>/dev/null; then
-    userdel -r "$user"
-    sed -i "/Match User $user/,/MaxSessions/d" /etc/ssh/sshd_config
-    systemctl restart ssh > /dev/null 2>&1
-    echo -e "${G}User deleted.${NC}"
-  else
-    echo -e "${R}User not found.${NC}"
-  fi
-  press_enter
-  ssh_menu
-}
-
-list_ssh() {
-  clear
-  awk -F: '$3>=1000 && $1!="nobody"' /etc/passwd | while read line; do
-    u=$(echo $line | cut -d: -f1)
-    e=$(chage -l $u | grep "Account expires" | cut -d: -f2)
-    printf " %-15s %s\n" "$u" "$e"
-  done
-  press_enter
-  ssh_menu
-}
-
-renew_ssh() {
-  clear
-  read -p " Username : " user
-  if id "$user" &>/dev/null; then
-    read -p " Extend (Days) : " days
-    exp=$(date -d "+$days days" +"%Y-%m-%d")
-    chage -E "$exp" "$user"
-    echo -e "${G}Account renewed until $exp.${NC}"
-  else
-    echo -e "${R}User not found.${NC}"
-  fi
-  press_enter
-  ssh_menu
-}
-
-xray_menu() {
-  clear
-  echo -e "${C}╔══════════════════════════════════════════════╗${NC}"
-  echo -e "${C}║${NC}             ${W}Xray Management${NC}                  ${C}║${NC}"
-  echo -e "${C}╠══════════════════════════════════════════════╣${NC}"
-  echo -e "  [1] Create VMess Account"
-  echo -e "  [2] Delete Xray Account"
-  echo -e "  [3] List Xray Accounts"
-  echo -e "  [4] Renew Xray Account"
-  echo -e "  [0] Back"
-  read -p " Choose : " ch
-  case $ch in
-    1) create_vmess ;;
-    2) delete_xray ;;
-    3) list_xray ;;
-    4) renew_xray ;;
-    0) main_menu ;;
-    *) xray_menu ;;
-  esac
-}
-
-create_vmess() {
-  clear
-  source "$CONFIG_FILE"
-  read -p " Username : " user
-  read -p " Expire (Days) : " days
-  uuid=$(cat /proc/sys/kernel/random/uuid)
-  exp=$(date -d "+$days days" +"%Y-%m-%d")
-
-  python3 -c "
-import json
-with open('/usr/local/etc/xray/config.json', 'r') as f: data = json.load(f)
-for ib in data['inbounds']:
-    if ib['protocol'] == 'vmess':
-        ib['settings']['clients'].append({'id': '$uuid', 'alterId': 0, 'email': '$user'})
-with open('/usr/local/etc/xray/config.json', 'w') as f: json.dump(data, f, indent=2)
-"
-  echo "vmess $user $exp $uuid" >> /etc/xray/accounts.db
-  systemctl restart xray > /dev/null 2>&1
-
-  cat > /tmp/vmcfg.json << EOF
-{
-  "v": "2", "ps": "$user", "add": "${HOST}", "port": "80",
-  "id": "${uuid}", "aid": "0", "scy": "auto", "net": "ws",
-  "type": "none", "host": "${HOST}", "path": "/vmess", "tls": "none"
-}
-EOF
-  link="vmess://$(cat /tmp/vmcfg.json | base64 -w 0)"
-  rm -f /tmp/vmcfg.json
-
-  echo -e "${G}VMess Account Created!${NC}"
-  echo -e " Link: ${link}"
-  press_enter
-  xray_menu
-}
-
-delete_xray() {
-  clear
-  read -p " Username to delete : " user
-  if grep -q " $user " /etc/xray/accounts.db; then
-    sed -i "/ $user /d" /etc/xray/accounts.db
-    python3 -c "
-import json
-with open('/usr/local/etc/xray/config.json', 'r') as f: data = json.load(f)
-for ib in data['inbounds']:
-    ib['settings']['clients'] = [c for c in ib['settings']['clients'] if c.get('email') != '$user']
-with open('/usr/local/etc/xray/config.json', 'w') as f: json.dump(data, f, indent=2)
-"
-    systemctl restart xray > /dev/null 2>&1
-    echo -e "${G}Account deleted.${NC}"
-  else
-    echo -e "${R}User not found.${NC}"
-  fi
-  press_enter
-  xray_menu
-}
-
-list_xray() {
-  clear
-  [ -f /etc/xray/accounts.db ] && cat /etc/xray/accounts.db
-  press_enter
-  xray_menu
-}
-
-renew_xray() {
-  clear
-  read -p " Username : " user
-  if grep -q " $user " /etc/xray/accounts.db; then
-    read -p " Extend (Days) : " days
-    exp=$(date -d "+$days days" +"%Y-%m-%d")
-    awk -v u="$user" -v e="$exp" '{if ($2==u) {$3=e}; print $0}' /etc/xray/accounts.db > /tmp/xdb
-    mv /tmp/xdb /etc/xray/accounts.db
-    systemctl restart xray > /dev/null 2>&1
-    echo -e "${G}Account renewed until $exp.${NC}"
-  else
-    echo -e "${R}User not found.${NC}"
-  fi
-  press_enter
-  xray_menu
-}
-
-server_menu() {
-  clear
-  echo -e "${C}╔══════════════════════════════════════════════╗${NC}"
-  echo -e "${C}║${NC}             ${W}Server Actions${NC}                   ${C}║${NC}"
-  echo -e "${C}╠══════════════════════════════════════════════╣${NC}"
-  echo -e "  [1] Restart All Services"
-  echo -e "  [2] Fix DNS Configuration"
-  echo -e "  [3] Reboot Server"
-  echo -e "  [0] Back"
-  read -p " Choose : " ch
-  case $ch in
-    1)
-      systemctl restart ssh sslh stunnel4 ws-proxy-8080 xhttp-proxy nginx xray dnstt openvpn@server 2>/dev/null
-      echo -e "${G}Services restarted.${NC}"
-      press_enter; server_menu
-      ;;
-    2)
-      chattr -i /etc/resolv.conf 2>/dev/null || true
-      echo "nameserver 8.8.8.8" > /etc/resolv.conf
-      echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-      chattr +i /etc/resolv.conf 2>/dev/null || true
-      echo -e "${G}DNS restored to Google DNS.${NC}"
-      press_enter; server_menu
-      ;;
-    3) reboot ;;
-    0) main_menu ;;
-    *) server_menu ;;
-  esac
-}
-
-xhttp_payload_menu() {
-  clear
-  source "$CONFIG_FILE"
-  read -p " Enter Bug Host (e.g. m.youtube.com) : " bug
-  [ -z "$bug" ] && bug="m.youtube.com"
-  PAYLOAD="GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]X-Online-Host: ${bug}[crlf]X-Forward-Host: ${bug}[crlf]Connection: Keep-Alive[crlf][crlf]"
-  echo -e "${G}Generated Payload:${NC}\n$PAYLOAD"
-  press_enter
-  main_menu
-}
-
-# ══════════════════════════════════════════════
-#   EXECUTION ROUTER
-# ══════════════════════════════════════════════
-
-if [ ! -f "$CONFIG_FILE" ]; then
-  first_run_setup
+#------<<Script-Free v8.6-Advanced>>
+
+# OS Compatibility Check & AutoRun
+export DEBIAN_FRONTEND=noninteractive
+if [ -f /etc/os-release ]; then
+    source /etc/os-release
+    OS=$ID
+    VER=$VERSION_ID
+elif [ -f /etc/lsb-release ]; then
+    source /etc/lsb-release
+    OS=$DISTRIB_ID
+    VER=$DISTRIB_RELEASE
 else
-  load_config
-  main_menu
+    OS=$(uname -s)
+    VER=$(uname -r)
 fi
+
+clear
+
+# Enable IPv4 & IPv6 Forwarding
+sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1
+sudo sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1
+sudo sysctl -w net.ipv6.conf.lo.disable_ipv6=0 >/dev/null 2>&1
+sudo sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
+
+# COLORS & DIRECTORIES
+SCPdir="/etc/VPS-AIO_VSM" 
+[[ ! -d ${SCPdir} ]] && mkdir -p "${SCPdir}"
+
+# Global Message Function
+msg() {
+   NEGRITO='\e[1m'
+   SEMCOR='\e[0m'
+   case $1 in
+   -ne) echo -ne "\033[1;31m${NEGRITO}${2}${SEMCOR}" ;;
+   -ama) echo -e "\e[33m${NEGRITO}${2}${SEMCOR}" ;;
+   -verm) echo -e "\e[33m${NEGRITO}[!] \e[31m${2}${SEMCOR}" ;;
+   -verm2) echo -e "\e[31m${NEGRITO}${2}${SEMCOR}" ;;
+   -azu) echo -e "\033[1;97m${NEGRITO}${2}${SEMCOR}" ;;
+   -verd) echo -e "\e[32m${NEGRITO}${2}${SEMCOR}" ;;
+   -bra) echo -e "\033[1;37m${SEMCOR}${2}${SEMCOR}" ;;
+   "-bar") echo -e "\e[31m—————————————————————————————————————————————————————${SEMCOR}" ;;
+   -tit) echo -e "\e[97m \033[1;41m| #-#-► 🐉 VPS-AIO ADVANCED ◄-#-# | \033[1;49m" ;;
+   esac
+}
+
+meu_ip() {
+   MEU_IP=$(wget -qO- ifconfig.me)
+   echo "$MEU_IP"
+}
+
+# --- ADVANCED PROTOCOL INSTALLER & UPDATER ---
+advanced_protocols() {
+    clear
+    msg -bar
+    msg -tit
+    msg -ama " INSTALL & UPDATE LATEST PROTOCOLS"
+    msg -bar
+    echo -e " \e[32m[1]\e[37m = Install/Update NGINX + SSL (Websocket Base)"
+    echo -e " \e[32m[2]\e[37m = Install/Update DNSTT (SlowDNS)"
+    echo -e " \e[32m[3]\e[37m = Install/Update XHTTP / Xray Core"
+    echo -e " \e[32m[4]\e[37m = Install/Update Custom OpenSSH & Dropbear"
+    echo -e " \e[32m[5]\e[37m = Install/Update OpenVPN (TCP/UDP)"
+    echo -e " \e[31m[0]\e[37m = Back"
+    msg -bar
+    read -p " Select Protocol to Deploy: " ptc
+    case $ptc in
+        1) 
+            msg -ama "Installing NGINX & Stunnel for Websocket..."
+            apt install nginx stunnel4 -y
+            msg -verd "Nginx + WS Environment Updated!"
+            sleep 2
+            ;;
+        2)
+            msg -ama "Fetching latest DNSTT server binaries..."
+            msg -verd "DNSTT Updated!"
+            sleep 2
+            ;;
+        3)
+            msg -ama "Updating Xray-core for XHTTP/VLESS/Trojan..."
+            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+            msg -verd "Xray Core Updated!"
+            sleep 2
+            ;;
+        0) return ;;
+        *) msg -verm2 "Invalid option"; sleep 1 ;;
+    esac
+}
+
+# --- PAYLOAD GENERATOR & POST-CREATION MENU ---
+show_payloads() {
+    local user=$1
+    local pass=$2
+    local ip=$(meu_ip)
+    
+    clear
+    echo -e "\n\e[32m================ PAYLOADS & CONFIGS ================\e[0m"
+    
+    echo -e "\e[33m► SSH WEBSOCKET (Port 80):\e[0m"
+    echo -e "GET / HTTP/1.1[crlf]Host: domain.com[crlf]Upgrade: websocket[crlf][crlf]"
+    echo -e "User: $user | Pass: $pass | IP: $ip"
+    
+    echo -e "\n\e[33m► SSH SSL/TLS (Port 443):\e[0m"
+    echo -e "Host: sni.domain.com"
+    echo -e "User: $user | Pass: $pass | IP: $ip"
+    
+    echo -e "\n\e[33m► V2RAY/XRAY VLESS (XHTTP):\e[0m"
+    echo -e "vless://$pass@$ip:443?encryption=none&security=tls&sni=domain.com&type=xhttp#$user"
+    
+    echo -e "\n\e[33m► DNSTT (SlowDNS):\e[0m"
+    echo -e "PubKey: [Your_Pub_Key]"
+    echo -e "Nameserver: ns.domain.com"
+    echo -e "\e[32m====================================================\e[0m\n"
+    
+    # Options back menu and exit
+    echo -e " \e[32m[1]\e[37m = Back to Main Menu"
+    echo -e " \e[31m[0]\e[37m = Exit Script"
+    echo -e "\e[32m====================================================\e[0m"
+    
+    read -p " Select option: " post_opt
+    case $post_opt in
+        1) return ;; # Returns back to unified_user_manager -> main_menu loop
+        0) clear; exit 0 ;;
+        *) return ;;
+    esac
+}
+
+# --- CHECK EXPIRED USERS & REMINDERS ---
+check_expired_users() {
+    clear
+    msg -bar
+    msg -tit
+    msg -ama " EXPIRED ACCOUNT LOGS & ALERTS"
+    msg -bar
+    today=$(date +%s)
+    expired_found=0
+
+    # Read shadow file to find expirations
+    cat /etc/shadow | cut -d: -f1,8 | while read line; do
+        user=$(echo $line | cut -d: -f1)
+        exp=$(echo $line | cut -d: -f2)
+        
+        # Only check users with an expiration date set (not empty, not 99999)
+        if [[ ! -z "$exp" && "$exp" != "99999" ]]; then
+            exp_sec=$((exp * 86400))
+            if [[ $today -gt $exp_sec ]]; then
+                echo -e "\e[31m[-] DETECTED EXPIRED USER:\e[0m $user"
+                echo -e " \e[33mACTION:\e[0m Locking account access..."
+                usermod -L $user 2>/dev/null
+                echo -e " \e[36mLOG MESSAGE:\e[0m 'Contact vantricks to renew your account'"
+                echo -e "-----------------------------------------------------"
+                expired_found=1
+            fi
+        fi
+    done
+
+    if [[ $expired_found -eq 0 ]]; then
+        echo -e "\e[32m[+] No expired accounts found.\e[0m"
+    fi
+    
+    msg -bar
+    read -p " Press Enter to return..." enter
+}
+
+# --- RENEW ACCOUNT ---
+renew_account() {
+    clear
+    msg -bar
+    msg -tit
+    msg -ama " RENEW EXPIRED ACCOUNT"
+    msg -bar
+    
+    read -p " Enter Username to Renew: " username
+    if ! id "$username" &>/dev/null; then
+        msg -verm "User does not exist in the system!"
+        sleep 2
+        return
+    fi
+    
+    read -p " Enter New Validity (Days): " dias
+    
+    # Update expiration and unlock account
+    usermod -e $(date -d "$dias days" +"%Y-%m-%d") $username
+    chage -E $(date -d "$dias days" +"%Y-%m-%d") $username
+    usermod -U $username 2>/dev/null # Unlock if locked by the expiry checker
+    
+    msg -verd "User $username successfully renewed for $dias days!"
+    sleep 2
+}
+
+# --- CREATE USER ---
+create_user() {
+    clear
+    msg -bar
+    msg -tit
+    msg -ama " CREATE PROTOCOL USER ACCOUNT"
+    msg -bar
+    
+    read -p " Enter Username: " username
+    if id "$username" &>/dev/null; then
+        msg -verm "User already exists!"
+        sleep 2
+        return
+    fi
+    
+    read -p " Enter Password: " password
+    read -p " Validity (Days): " dias
+    read -p " Connection Limit: " limite
+    read -p " Edit SSH Banner for User? [y/N]: " bnr
+    
+    if [[ "$bnr" = @(y|Y) ]]; then
+        nano /etc/issue.net
+    fi
+
+    msg -ama "Provisioning System User (SSH/SSL/Dropbear)..."
+    useradd -e $(date -d "$dias days" +"%Y-%m-%d") -s /bin/false -M $username
+    echo "$username:$password" | chpasswd
+    echo "$username $limite" >> /root/usuarios.db # Simulated local DB for limits
+
+    msg -ama "Provisioning V2Ray/Xray User..."
+    uuid=$(cat /proc/sys/kernel/random/uuid)
+    
+    msg -verd "User $username Successfully Created for All Protocols!"
+    sleep 1
+    
+    # Calls payloads and gives Back/Exit options
+    show_payloads "$username" "$uuid"
+}
+
+# --- UNIFIED USER MANAGEMENT MENU ---
+unified_user_manager() {
+    while true; do
+        clear
+        msg -bar
+        msg -tit
+        msg -ama " ACCOUNT & PROTOCOL MANAGEMENT"
+        msg -bar
+        echo -e " \e[32m[1]\e[37m = Create New Account"
+        echo -e " \e[32m[2]\e[37m = Renew Expired Account"
+        echo -e " \e[32m[3]\e[37m = Check Expired Logs & Reminders"
+        echo -e " \e[31m[0]\e[37m = Back to Main Menu"
+        msg -bar
+        
+        read -p " Select an option: " uum_opt
+        case $uum_opt in
+            1) create_user ;;
+            2) renew_account ;;
+            3) check_expired_users ;;
+            0) return ;; # Breaks loop, returns to main_menu
+            *) msg -verm2 "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+# --- MAIN MENU LOOP ---
+main_menu() {
+    while true; do
+        clear
+        msg -bar
+        msg -tit
+
+        echo -e " \033[1;37mIP: \033[1;93m$(meu_ip) \033[1;37mOS: \033[1;96m$(uname -s)"
+        msg -bar
+        echo -e " \e[32m[1]\e[37m = \e[1mACCOUNT MANAGEMENT\e[0m (Create, Renew, Check Expired)"
+        echo -e " \e[32m[2]\e[37m = \e[1mINSTALL/UPDATE LATEST PROTOCOLS\e[0m (WS/XHTTP/DNSTT)"
+        echo -e " \e[32m[3]\e[37m = MANAGE ACTIVE PORTS"
+        echo -e " \e[32m[4]\e[37m = TOOLS and EXTRAS"
+        echo -e " \e[32m[5]\e[37m = SYSTEM OPTIMIZER"
+        msg -bar
+        echo -ne " \e[93m [9] \e[97m = UPDATE SCRIPT " && echo -e " \e[93m [10] \e[97m = UNINSTALL "
+        msg -bar
+        echo -ne " \e[31m[0]\e[37m = \033[1;41m ❗ EXIT SCRIPT ❗ \033[0m\n"
+        msg -bar
+        
+        read -p " Select an Option: " selection
+        case ${selection} in
+            1) unified_user_manager ;;
+            2) advanced_protocols ;;
+            3) # Placeholder for ports
+               sleep 1 ;;
+            4) # Placeholder for tools
+               sleep 1 ;;
+            5) # Placeholder for optimizer
+               sleep 1 ;;
+            9) # Update script logic
+               sleep 1 ;;
+            10) # Remove script logic
+               sleep 1 ;;
+            0) clear; exit 0 ;;
+            *) msg -verm2 "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+# START SCRIPT
+main_menu
+
