@@ -872,9 +872,15 @@ ssh_menu() {
   esac
 }
 
+# ══════════════════════════════════════════════
+# MODIFIED: SSH ACCOUNT CREATION + COPY MENU
+# ══════════════════════════════════════════════
 create_ssh() {
   clear
   source "$CONFIG_FILE"
+  
+  # Fetch server resource stats (RAM, etc.)
+  get_info 
   SERVER_IP=$(hostname -I | awk '{print $1}')
   
   read -p " Username : " user
@@ -898,7 +904,10 @@ create_ssh() {
   echo -e " Password : $pass"
   echo -e " Expired On : $exp"
   echo -e " Limit Login : $limit IP"
-  echo -e " Host/IP : ${HOST} / ${SERVER_IP}"
+  echo -e " Host : ${HOST}"
+  echo -e " IP Address : ${SERVER_IP}"
+  echo -e " RAM Usage : $RAM_USED MB / $RAM_TOTAL MB ($RAM_PERCENT%)"
+  echo -e "======================================="
   echo -e " SSH Port : 22"
   echo -e " WS Port : 80, 8080"
   echo -e " WS SSL Port : 443"
@@ -908,12 +917,80 @@ create_ssh() {
   echo -e " DNSTT Port : 53 (UDP)"
   echo -e " DNSTT PubKey : ${DNSTT_PUBKEY}"
   echo -e "======================================="
-  echo -e " Payload WS : GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]Upgrade: websocket[crlf][crlf]"
-  echo -e " Payload XHTTP : GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]X-Online-Host: ${HOST}[crlf]Connection: Keep-Alive[crlf][crlf]"
-  echo -e "======================================="
+  
+  # INTERACTIVE COPY MENU LOOP
+  while true; do
+    echo -e "\n${Y}>>> COPY OPTIONS <<<${NC}"
+    echo -e " [1] Display Raw Details & OVPN Config (Ready to Highlight/Copy)"
+    echo -e " [2] Save Account & OVPN Config to File"
+    echo -e " [0] Done / Continue"
+    read -p " Choose an option : " copy_ch
+    case $copy_ch in
+        1)
+            clear
+            echo -e "${W}====================================================${NC}"
+            echo -e "${W} SSH & OVPN ACCOUNT DETAILS ${NC}"
+            echo -e "${W}====================================================${NC}"
+            echo -e "Username : $user"
+            echo -e "Password : $pass"
+            echo -e "Host : ${HOST}"
+            echo -e "IP Address : ${SERVER_IP}"
+            echo -e "RAM Usage : $RAM_USED MB / $RAM_TOTAL MB ($RAM_PERCENT%)"
+            echo -e "Expiration : $exp"
+            echo -e "${W}====================================================${NC}"
+            echo -e "${W} PAYLOADS ${NC}"
+            echo -e "${W}====================================================${NC}"
+            echo -e "WS:"
+            echo -e "GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]Upgrade: websocket[crlf][crlf]"
+            echo -e "XHTTP:"
+            echo -e "GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]X-Online-Host: ${HOST}[crlf]Connection: Keep-Alive[crlf][crlf]"
+            echo -e "${W}====================================================${NC}"
+            echo -e "${W} OVPN CERTIFICATE (client.ovpn) ${NC}"
+            echo -e "${W}====================================================${NC}"
+            cat /root/client.ovpn
+            echo -e "${W}====================================================${NC}"
+            echo -e "${G}>> HIGHLIGHT THE TEXT ABOVE TO COPY <<${NC}"
+            press_enter
+            ;;
+        2)
+            {
+                echo "===================================================="
+                echo " SSH & OVPN ACCOUNT DETAILS "
+                echo "===================================================="
+                echo "Username : $user"
+                echo "Password : $pass"
+                echo "Host : ${HOST}"
+                echo "IP Address : ${SERVER_IP}"
+                echo "RAM Usage : $RAM_USED MB / $RAM_TOTAL MB ($RAM_PERCENT%)"
+                echo "Expiration : $exp"
+                echo "===================================================="
+                echo " PAYLOADS "
+                echo "===================================================="
+                echo "WS:"
+                echo "GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]Upgrade: websocket[crlf][crlf]"
+                echo "XHTTP:"
+                echo "GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]X-Online-Host: ${HOST}[crlf]Connection: Keep-Alive[crlf][crlf]"
+                echo "===================================================="
+                echo " OVPN CERTIFICATE (client.ovpn) "
+                echo "===================================================="
+                cat /root/client.ovpn
+                echo "===================================================="
+            } > "/root/${user}-account.txt"
+            echo -e "${G}Account details successfully saved to /root/${user}-account.txt${NC}"
+            press_enter
+            ;;
+        0)
+            break
+            ;;
+        *)
+            echo -e "${R}Invalid option${NC}"
+            ;;
+    esac
+  done
   
   post_creation_menu
 }
+# ══════════════════════════════════════════════
 
 delete_ssh() {
   clear
