@@ -17,6 +17,9 @@ DIV="═════════════════════════
 CONFIG_FILE="/etc/vantricks_script.conf"
 PACKAGES_FILE="/etc/vantricks_packages.list"
 ACCOUNT_PKG_DB="/etc/vantricks_account_packages.db"
+SNI_PROXY_HOST_FILE="/etc/vantricks_sni_proxy_hosts.list"
+BOOSTER_SYSCTL_CONF="/etc/sysctl.d/99-vantricks-booster.conf"
+BOOSTER_SCRIPT="/usr/local/bin/vantricks-booster.py"
 OVPN_DIR="/etc/openvpn/server"
 OVPN_CLIENT_DIR="/etc/openvpn/client"
 XRAY_CONF="/usr/local/etc/xray/config.json"
@@ -24,6 +27,17 @@ XRAY_DB="/etc/xray/accounts.db"
 NGINX_V2RAY_CONF="/etc/nginx/conf.d/v2ray.conf"
 SERVER_ERROR_MSG="Server error contact owner vantricks team."
 AUTO_REBOOT_ON_SAVE="ON"
+
+# Default Protocol Toggles (All ON by default)
+PROTO_SSH="ON"
+PROTO_OVPN="ON"
+PROTO_SSL="ON"
+PROTO_MUX="ON"
+PROTO_WS="ON"
+PROTO_NGINX="ON"
+PROTO_XRAY="ON"
+PROTO_DNSTT="ON"
+BOOSTER_ENABLED="ON"
 
 # ── PASSWORD CHECK ────────────────────────────────
 check_password() {
@@ -74,8 +88,45 @@ check_os() {
 
 init_packages_store() {
   mkdir -p /etc
-  touch "$PACKAGES_FILE" "$ACCOUNT_PKG_DB"
-  sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE" 2>/dev/null || true
+  touch "$PACKAGES_FILE" "$ACCOUNT_PKG_DB" "$SNI_PROXY_HOST_FILE"
+  sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE" "$SNI_PROXY_HOST_FILE" 2>/dev/null || true
+}
+
+ensure_default_toggles() {
+  mkdir -p /etc
+  touch "$CONFIG_FILE"
+  source "$CONFIG_FILE" 2>/dev/null || true
+
+  local VARS=(
+    "PROTO_SSH=${PROTO_SSH:-ON}"
+    "PROTO_OVPN=${PROTO_OVPN:-ON}"
+    "PROTO_SSL=${PROTO_SSL:-ON}"
+    "PROTO_MUX=${PROTO_MUX:-ON}"
+    "PROTO_WS=${PROTO_WS:-ON}"
+    "PROTO_NGINX=${PROTO_NGINX:-ON}"
+    "PROTO_XRAY=${PROTO_XRAY:-ON}"
+    "PROTO_DNSTT=${PROTO_DNSTT:-ON}"
+    "BOOSTER_ENABLED=${BOOSTER_ENABLED:-ON}"
+    "AUTO_REBOOT_ON_SAVE=${AUTO_REBOOT_ON_SAVE:-ON}"
+  )
+
+  for entry in "${VARS[@]}"; do
+    local k="${entry%%=*}"
+    if ! grep -q "^${k}=" "$CONFIG_FILE" 2>/dev/null; then
+      echo "$entry" >> "$CONFIG_FILE"
+    fi
+  done
+  source "$CONFIG_FILE" 2>/dev/null || true
+}
+
+set_config_kv() {
+  local KEY="$1"
+  local VAL="$2"
+  mkdir -p /etc
+  touch "$CONFIG_FILE"
+  sed -i "/^${KEY}=/d" "$CONFIG_FILE" 2>/dev/null || true
+  echo "${KEY}=${VAL}" >> "$CONFIG_FILE"
+  export "$KEY=$VAL"
 }
 
 get_auto_reboot_state() {
@@ -90,10 +141,7 @@ get_auto_reboot_state() {
 set_auto_reboot_state() {
   local NEW_STATE="${1^^}"
   [ "$NEW_STATE" != "ON" ] && NEW_STATE="OFF"
-  mkdir -p /etc
-  touch "$CONFIG_FILE"
-  sed -i '/^AUTO_REBOOT_ON_SAVE=/d' "$CONFIG_FILE" 2>/dev/null || true
-  echo "AUTO_REBOOT_ON_SAVE=$NEW_STATE" >> "$CONFIG_FILE"
+  set_config_kv "AUTO_REBOOT_ON_SAVE" "$NEW_STATE"
   AUTO_REBOOT_ON_SAVE="$NEW_STATE"
 }
 
@@ -108,6 +156,544 @@ toggle_auto_reboot() {
     echo -e "\n ${G}[✓] Auto Reboot on Save is now: ON${N}"
   fi
   sleep 1
+}
+
+# ══════════════════════════════════════════════
+#   PYTHON REAL-TIME ENHANCEMENT BOOSTER & ENGINE
+# ══════════════════════════════════════════════
+
+install_booster_python() {
+  mkdir -p /usr/local/bin /etc/sysctl.d
+  cat > "$BOOSTER_SCRIPT" << 'BOOSTERPY'
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import time
+import socket
+import subprocess
+
+SYSCTL_FILE = "/etc/sysctl.d/99-vantricks-booster.conf"
+SNI_LIST_FILE = "/etc/vantricks_sni_proxy_hosts.list"
+CONFIG_FILE = "/etc/vantricks_script.conf"
+
+SYSCTL_PARAMS = {
+    "net.core.default_qdisc": "fq",
+    "net.ipv4.tcp_congestion_control": "bbr",
+    "net.ipv4.tcp_window_scaling": "1",
+    "net.ipv4.tcp_sack": "1",
+    "net.ipv4.tcp_fastopen": "3",
+    "net.ipv4.tcp_tw_reuse": "1",
+    "net.ipv4.tcp_fin_timeout": "15",
+    "net.ipv4.tcp_keepalive_time": "60",
+    "net.ipv4.tcp_keepalive_intvl": "15",
+    "net.ipv4.tcp_keepalive_probes": "4",
+    "net.core.rmem_max": "67108864",
+    "net.core.wmem_max": "67108864",
+    "net.core.rmem_default": "1048576",
+    "net.core.wmem_default": "1048576",
+    "net.ipv4.tcp_rmem": "4096 1048576 67108864",
+    "net.ipv4.tcp_wmem": "4096 1048576 67108864",
+    "net.core.somaxconn": "65535",
+    "net.core.netdev_max_backlog": "65535",
+    "net.ipv4.tcp_max_syn_backlog": "32768",
+    "net.ipv4.tcp_syncookies": "1",
+    "net.ipv4.tcp_mtu_probing": "1",
+    "vm.swappiness": "10",
+    "fs.file-max": "2097152",
+}
+
+SERVICES = [
+    ("SSH", ["ssh", "sshd"]),
+    ("OVPN-UDP", ["openvpn@server"]),
+    ("OVPN-TCP", ["openvpn@server-tcp"]),
+    ("SSL", ["stunnel4"]),
+    ("MUX", ["sslh", "sslh-select"]),
+    ("WS-8080", ["ws-proxy-8080"]),
+    ("NGINX", ["nginx"]),
+    ("XRAY", ["xray"]),
+    ("DNSTT", ["dnstt"]),
+]
+
+def run_cmd(cmd):
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
+        return out.strip()
+    except Exception:
+        return ""
+
+def read_sysctl(key):
+    path = "/proc/sys/" + key.replace(".", "/")
+    try:
+        with open(path, "r") as f:
+            return " ".join(f.read().strip().split())
+    except Exception:
+        return run_cmd(["sysctl", "-n", key])
+
+def apply_booster():
+    subprocess.run(["modprobe", "tcp_bbr"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.makedirs("/etc/modules-load.d", exist_ok=True)
+    with open("/etc/modules-load.d/vantricks-bbr.conf", "w") as mf:
+        mf.write("tcp_bbr\n")
+
+    lines = ["# Vantricks Real-Time Kernel & Network Enhancement Booster"]
+    for k, v in SYSCTL_PARAMS.items():
+        lines.append(f"{k} = {v}")
+        subprocess.run(["sysctl", "-w", f"{k}={v}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    with open(SYSCTL_FILE, "w") as sf:
+        sf.write("\n".join(lines) + "\n")
+    subprocess.run(["sysctl", "--system"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # Apply fq qdisc on default interface immediately
+    route_out = run_cmd(["ip", "route", "show", "default"])
+    if route_out:
+        parts = route_out.split()
+        if "dev" in parts:
+            iface = parts[parts.index("dev") + 1]
+            subprocess.run(["tc", "qdisc", "replace", "dev", iface, "root", "fq"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def service_active(names):
+    for n in names:
+        st = run_cmd(["systemctl", "is-active", n])
+        if st == "active":
+            return True
+    return False
+
+def get_sni_hosts():
+    if not os.path.exists(SNI_LIST_FILE):
+        return []
+    with open(SNI_LIST_FILE, "r") as f:
+        return [line.strip() for line in f if line.strip()]
+
+def evaluate_metrics():
+    score = 0
+    details = {}
+
+    # 1. BBR + FQ Congestion Control (25 pts)
+    cc = read_sysctl("net.ipv4.tcp_congestion_control")
+    qd = read_sysctl("net.core.default_qdisc")
+    bbr_pts = 0
+    if cc == "bbr":
+        bbr_pts += 18
+    elif cc:
+        bbr_pts += 6
+    if qd in ("fq", "fq_codel"):
+        bbr_pts += 7
+    score += bbr_pts
+    details["cc"] = cc or "unknown"
+    details["qdisc"] = qd or "unknown"
+    details["bbr_pts"] = bbr_pts
+
+    # 2. TCP Buffers, FastOpen & Keepalive (25 pts)
+    rmem = read_sysctl("net.core.rmem_max")
+    tfo = read_sysctl("net.ipv4.tcp_fastopen")
+    ka = read_sysctl("net.ipv4.tcp_keepalive_time")
+    buf_pts = 0
+    try:
+        if int(rmem) >= 16777216:
+            buf_pts += 12
+        elif int(rmem) >= 2097152:
+            buf_pts += 6
+    except Exception:
+        pass
+    if tfo in ("3", "2", "1"):
+        buf_pts += 7
+    try:
+        if int(ka) <= 120:
+            buf_pts += 6
+    except Exception:
+        pass
+    score += buf_pts
+    details["rmem_max"] = rmem or "0"
+    details["fastopen"] = tfo or "0"
+    details["keepalive"] = ka or "7200"
+    details["buf_pts"] = buf_pts
+
+    # 3. Protocol Services Health (25 pts)
+    active_count = 0
+    svc_states = {}
+    for label, unit_list in SERVICES:
+        up = service_active(unit_list)
+        svc_states[label] = up
+        if up:
+            active_count += 1
+    svc_pts = round((active_count / len(SERVICES)) * 25)
+    score += svc_pts
+    details["active_services"] = active_count
+    details["total_services"] = len(SERVICES)
+    details["svc_states"] = svc_states
+    details["svc_pts"] = svc_pts
+
+    # 4. SNI / Proxy / Host Readiness & Local Latency (15 pts)
+    sni_hosts = get_sni_hosts()
+    sni_pts = 0
+    if len(sni_hosts) > 0:
+        sni_pts += 8
+    t0 = time.perf_counter()
+    local_ok = False
+    for port in (8080, 8880, 22):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.4):
+                local_ok = True
+                break
+        except Exception:
+            continue
+    rtt_ms = round((time.perf_counter() - t0) * 1000, 2)
+    if local_ok:
+        sni_pts += 7
+    score += sni_pts
+    details["sni_count"] = len(sni_hosts)
+    details["sni_hosts"] = sni_hosts
+    details["local_rtt_ms"] = rtt_ms
+    details["sni_pts"] = sni_pts
+
+    # 5. Memory & CPU Headroom (10 pts)
+    mem_avail_pct = 50.0
+    try:
+        meminfo = {}
+        with open("/proc/meminfo") as mf:
+            for line in mf:
+                parts = line.split()
+                if len(parts) >= 2:
+                    meminfo[parts[0].rstrip(":")] = int(parts[1])
+        total_m = meminfo.get("MemTotal", 1)
+        avail_m = meminfo.get("MemAvailable", meminfo.get("MemFree", 0))
+        mem_avail_pct = round((avail_m / max(total_m, 1)) * 100, 1)
+    except Exception:
+        pass
+    res_pts = 10 if mem_avail_pct >= 25 else (6 if mem_avail_pct >= 12 else 3)
+    score += res_pts
+    details["mem_avail_pct"] = mem_avail_pct
+    details["res_pts"] = res_pts
+
+    score = max(0, min(100, int(score)))
+    if score >= 90:
+        verdict = "ULTRA BOOSTED (OPTIMAL)"
+        tier = "S+"
+    elif score >= 75:
+        verdict = "HIGH STRENGTH (ENHANCED)"
+        tier = "A"
+    elif score >= 55:
+        verdict = "MODERATE (NEEDS BOOST)"
+        tier = "B"
+    else:
+        verdict = "LOW / UNOPTIMIZED"
+        tier = "C"
+
+    # Active TCP connections count
+    tcp_estab = run_cmd(["ss", "-s"])
+    estab_num = "0"
+    for line in tcp_estab.splitlines():
+        if "estab" in line:
+            for tok in line.replace(",", " ").replace("(", " ").split():
+                if tok.isdigit():
+                    estab_num = tok
+                    break
+
+    return {
+        "score": score,
+        "tier": tier,
+        "verdict": verdict,
+        "estab_tcp": estab_num,
+        "details": details,
+    }
+
+def render_bar(pct, width=22):
+    filled = int(round((pct / 100.0) * width))
+    return "█" * filled + "░" * (width - filled)
+
+def live_monitor(iterations=0):
+    G = "\033[0;32m"
+    C = "\033[0;36m"
+    Y = "\033[1;33m"
+    R = "\033[0;31m"
+    W = "\033[1;37m"
+    N = "\033[0m"
+    count = 0
+    try:
+        while True:
+            data = evaluate_metrics()
+            sc = data["score"]
+            col = G if sc >= 80 else (Y if sc >= 55 else R)
+            d = data["details"]
+            os.system("clear")
+            print(f"{C}╔══════════════════════════════════════════════════════╗{N}")
+            print(f"{C}║{N}    {W}VANTRICKS REAL-TIME PYTHON ENHANCEMENT BOOSTER{N}    {C}║{N}")
+            print(f"{C}╠══════════════════════════════════════════════════════╣{N}")
+            print(f"{C}║{N}  Strength Score : {col}{sc}/100 [{data['tier']}] {render_bar(sc)}{N}")
+            print(f"{C}║{N}  Live Verdict   : {col}{data['verdict']}{N}")
+            print(f"{C}╠══════════════════════════════════════════════════════╣{N}")
+            print(f"{C}║{N}  TCP Congestion : {G}{d['cc'].upper()}{N} | Qdisc: {G}{d['qdisc']}{N} ({d['bbr_pts']}/25 pts)")
+            print(f"{C}║{N}  TCP Buffer Max : {G}{d['rmem_max']} B{N} | FastOpen: {G}{d['fastopen']}{N} ({d['buf_pts']}/25 pts)")
+            print(f"{C}║{N}  Keepalive Time : {G}{d['keepalive']}s{N} | Active TCP: {G}{data['estab_tcp']}{N}")
+            print(f"{C}║{N}  Services Up    : {G}{d['active_services']}/{d['total_services']}{N} ({d['svc_pts']}/25 pts)")
+            print(f"{C}║{N}  SNI/Proxy Hosts: {G}{d['sni_count']} Active{N} | Local RTT: {G}{d['local_rtt_ms']} ms{N} ({d['sni_pts']}/15 pts)")
+            print(f"{C}║{N}  Free RAM Head  : {G}{d['mem_avail_pct']}%{N} ({d['res_pts']}/10 pts)")
+            print(f"{C}╠══════════════════════════════════════════════════════╣{N}")
+            svc_line = "  "
+            for idx, (lbl, up) in enumerate(d["svc_states"].items(), 1):
+                mark = f"{G}ON{N}" if up else f"{R}OFF{N}"
+                svc_line += f"{lbl}:{mark}  "
+                if idx % 3 == 0:
+                    print(f"{C}║{N}{svc_line}")
+                    svc_line = "  "
+            if svc_line.strip():
+                print(f"{C}║{N}{svc_line}")
+            print(f"{C}╠══════════════════════════════════════════════════════╣{N}")
+            print(f"{C}║{N}  {Y}Press Ctrl+C to return to Vantricks Manager...{N}       {C}║{N}")
+            print(f"{C}╚══════════════════════════════════════════════════════╝{N}")
+            count += 1
+            if iterations > 0 and count >= iterations:
+                break
+            time.sleep(2)
+    except KeyboardInterrupt:
+        pass
+
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "json"
+    if mode == "apply":
+        apply_booster()
+        res = evaluate_metrics()
+        print(json.dumps(res))
+    elif mode == "summary":
+        res = evaluate_metrics()
+        print(f"{res['score']}|{res['tier']}|{res['verdict']}")
+    elif mode == "live":
+        live_monitor(0)
+    elif mode == "once":
+        live_monitor(1)
+    else:
+        print(json.dumps(evaluate_metrics()))
+BOOSTERPY
+  chmod +x "$BOOSTER_SCRIPT"
+}
+
+apply_enhancement_booster() {
+  [ ! -x "$BOOSTER_SCRIPT" ] && install_booster_python
+  python3 "$BOOSTER_SCRIPT" apply > /dev/null 2>&1 || true
+}
+
+get_booster_verdict_and_score() {
+  [ ! -x "$BOOSTER_SCRIPT" ] && install_booster_python
+  local RAW
+  RAW=$(python3 "$BOOSTER_SCRIPT" summary 2>/dev/null || echo "70|B|ENHANCEMENT ACTIVE")
+  BOOSTER_SCORE=$(echo "$RAW" | cut -d'|' -f1)
+  BOOSTER_TIER=$(echo "$RAW" | cut -d'|' -f2)
+  BOOSTER_VERDICT=$(echo "$RAW" | cut -d'|' -f3)
+}
+
+# ══════════════════════════════════════════════
+#   PROTOCOL DEFAULT TOGGLE MANAGER (ALL ON BY DEFAULT)
+# ══════════════════════════════════════════════
+
+toggle_single_protocol() {
+  local VAR_NAME="$1"
+  local LABEL="$2"
+  local SVC_LIST="$3"
+  ensure_default_toggles
+  local CUR="${!VAR_NAME}"
+  if [ "$CUR" == "ON" ]; then
+    set_config_kv "$VAR_NAME" "OFF"
+    for s in $SVC_LIST; do
+      systemctl stop "$s" > /dev/null 2>&1 || true
+      systemctl disable "$s" > /dev/null 2>&1 || true
+    done
+    echo -e "\n ${Y}[✓] ${LABEL} toggled OFF${N}"
+  else
+    set_config_kv "$VAR_NAME" "ON"
+    for s in $SVC_LIST; do
+      systemctl enable "$s" > /dev/null 2>&1 || true
+      systemctl restart "$s" > /dev/null 2>&1 || true
+    done
+    echo -e "\n ${G}[✓] ${LABEL} toggled ON${N}"
+  fi
+  sleep 1
+}
+
+enable_all_protocols_default() {
+  set_config_kv "PROTO_SSH" "ON"
+  set_config_kv "PROTO_OVPN" "ON"
+  set_config_kv "PROTO_SSL" "ON"
+  set_config_kv "PROTO_MUX" "ON"
+  set_config_kv "PROTO_WS" "ON"
+  set_config_kv "PROTO_NGINX" "ON"
+  set_config_kv "PROTO_XRAY" "ON"
+  set_config_kv "PROTO_DNSTT" "ON"
+  set_config_kv "BOOSTER_ENABLED" "ON"
+
+  for s in ssh openvpn@server openvpn@server-tcp stunnel4 sslh sslh-select ws-proxy-8080 nginx xray dnstt; do
+    systemctl enable "$s" > /dev/null 2>&1 || true
+    systemctl restart "$s" > /dev/null 2>&1 || true
+  done
+  apply_enhancement_booster
+  echo -e "\n ${G}[✓] All Protocols & Enhancement Booster set to ON!${N}"
+  sleep 1
+}
+
+protocol_toggles_menu() {
+  while true; do
+    ensure_default_toggles
+    clear
+    fmt_onoff() {
+      if [ "$1" == "ON" ]; then echo -e "${G}[ON] ${N}"; else echo -e "${R}[OFF]${N}"; fi
+    }
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}       ${W}ALL PROTOCOLS TOGGLE (DEFAULT: ON)${N}       ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} SSH Protocol             : $(fmt_onoff "$PROTO_SSH")"
+    echo -e "${C}║${N}  ${W}[2]${N} OpenVPN (TCP443/UDP1194) : $(fmt_onoff "$PROTO_OVPN")"
+    echo -e "${C}║${N}  ${W}[3]${N} SSL / Stunnel4           : $(fmt_onoff "$PROTO_SSL")"
+    echo -e "${C}║${N}  ${W}[4]${N} Multiplexer (SSLH)       : $(fmt_onoff "$PROTO_MUX")"
+    echo -e "${C}║${N}  ${W}[5]${N} WebSocket Proxy (8080)   : $(fmt_onoff "$PROTO_WS")"
+    echo -e "${C}║${N}  ${W}[6]${N} Nginx Reverse Proxy      : $(fmt_onoff "$PROTO_NGINX")"
+    echo -e "${C}║${N}  ${W}[7]${N} Xray (VMess/VLESS/Trojan): $(fmt_onoff "$PROTO_XRAY")"
+    echo -e "${C}║${N}  ${W}[8]${N} DNSTT DNS Tunnel         : $(fmt_onoff "$PROTO_DNSTT")"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[A]${N} Set ALL Protocols ON (Default)           ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                        ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Option >>> " TOPT
+    case "$TOPT" in
+      1) toggle_single_protocol "PROTO_SSH" "SSH Protocol" "ssh" ;;
+      2) toggle_single_protocol "PROTO_OVPN" "OpenVPN" "openvpn@server openvpn@server-tcp" ;;
+      3) toggle_single_protocol "PROTO_SSL" "SSL Stunnel4" "stunnel4" ;;
+      4) toggle_single_protocol "PROTO_MUX" "Multiplexer SSLH" "sslh sslh-select" ;;
+      5) toggle_single_protocol "PROTO_WS" "WebSocket 8080" "ws-proxy-8080" ;;
+      6) toggle_single_protocol "PROTO_NGINX" "Nginx Reverse Proxy" "nginx" ;;
+      7) toggle_single_protocol "PROTO_XRAY" "Xray WS" "xray" ;;
+      8) toggle_single_protocol "PROTO_DNSTT" "DNSTT" "dnstt" ;;
+      a|A) enable_all_protocols_default ;;
+      0) break ;;
+      *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════
+#   SNI | PROXY | HOST MANAGER (ADD / DELETE / SAVE -> REBOOT + BOOSTER)
+# ══════════════════════════════════════════════
+
+sni_proxy_host_menu() {
+  init_packages_store
+  local STAGED_FILE
+  STAGED_FILE=$(mktemp)
+  cp "$SNI_PROXY_HOST_FILE" "$STAGED_FILE" 2>/dev/null || true
+  local UNSAVED_CHANGES=0
+
+  while true; do
+    clear
+    get_booster_verdict_and_score
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}          ${W}SNI | PROXY | HOST MANAGER${N}          ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  Strength : ${G}${BOOSTER_SCORE}/100 [${BOOSTER_TIER}]${N}"
+    echo -e "${C}║${N}  Verdict  : ${G}${BOOSTER_VERDICT}${N}"
+    if [ "$UNSAVED_CHANGES" -eq 1 ]; then
+      echo -e "${C}║${N}  Status   : ${Y}UNSAVED CHANGES (Click [s] Save)${N}"
+    else
+      echo -e "${C}║${N}  Status   : ${G}SYNCED${N}"
+    fi
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+
+    mapfile -t SPH_LIST < "$STAGED_FILE"
+    if [ ${#SPH_LIST[@]} -eq 0 ]; then
+      echo -e "${C}║${N}  ${Y}No SNI / Proxy / Host entries configured.${N}"
+    else
+      local idx=1
+      for entry in "${SPH_LIST[@]}"; do
+        echo -e "${C}║${N}  ${W}[$idx]${N} ${G}${entry}${N}"
+        idx=$((idx + 1))
+      done
+    fi
+
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[a]${N} Add (e.g. cdn.mypocketdoctor.com)        ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[d]${N} Delete Entry                             ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[s]${N} Save (Apply Booster + Auto Reboot)       ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back (Discard Unsaved)                   ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Action >>> " SPH_OPT
+
+    case "$SPH_OPT" in
+      a|A)
+        echo ""
+        read -p "  Enter SNI | Proxy | Host (e.g. cdn.mypocketdoctor.com): " NEW_SPH
+        NEW_SPH=$(echo "$NEW_SPH" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [ -z "$NEW_SPH" ]; then
+          echo -e " ${R}[!] Input cannot be empty!${N}"
+          sleep 1
+        else
+          echo "$NEW_SPH" >> "$STAGED_FILE"
+          sed -i '/^[[:space:]]*$/d' "$STAGED_FILE"
+          UNSAVED_CHANGES=1
+          echo -e " ${G}[✓] Added '${NEW_SPH}' to list (Click [s] Save to apply & reboot).${N}"
+          sleep 1
+        fi
+        ;;
+      d|D)
+        mapfile -t SPH_LIST < "$STAGED_FILE"
+        if [ ${#SPH_LIST[@]} -eq 0 ]; then
+          echo -e "\n ${R}[!] List is empty!${N}"
+          sleep 1
+        else
+          read -p "  Enter entry # to delete : " DEL_SPH_IDX
+          if ! [[ "$DEL_SPH_IDX" =~ ^[0-9]+$ ]] || [ "$DEL_SPH_IDX" -lt 1 ] || [ "$DEL_SPH_IDX" -gt "${#SPH_LIST[@]}" ]; then
+            echo -e "\n ${R}[!] Invalid entry number!${N}"
+            sleep 1
+          else
+            local POS=$((DEL_SPH_IDX - 1))
+            local REM_ITEM="${SPH_LIST[$POS]}"
+            unset 'SPH_LIST[$POS]'
+            if [ ${#SPH_LIST[@]} -gt 0 ]; then
+              printf "%s\n" "${SPH_LIST[@]}" > "$STAGED_FILE"
+            else
+              : > "$STAGED_FILE"
+            fi
+            sed -i '/^[[:space:]]*$/d' "$STAGED_FILE"
+            UNSAVED_CHANGES=1
+            echo -e "\n ${Y}[✓] Deleted '${REM_ITEM}' from list (Click [s] Save to apply & reboot).${N}"
+            sleep 1
+          fi
+        fi
+        ;;
+      s|S)
+        sed -i '/^[[:space:]]*$/d' "$STAGED_FILE"
+        cp "$STAGED_FILE" "$SNI_PROXY_HOST_FILE"
+        rm -f "$STAGED_FILE"
+
+        # Update primary HOST to latest entry if list is non-empty
+        LATEST_SPH=$(tail -n 1 "$SNI_PROXY_HOST_FILE" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$LATEST_SPH" ]; then
+          set_config_kv "HOST" "$LATEST_SPH"
+          if [ -d "$OVPN_CLIENT_DIR" ]; then
+            for ovpn in "${OVPN_CLIENT_DIR}"/*-tcp443.ovpn; do
+              [ -f "$ovpn" ] || continue
+              u_name=$(basename "$ovpn" "-tcp443.ovpn")
+              generate_ovpn_profile "$u_name"
+            done
+          fi
+        fi
+
+        echo ""
+        echo -e " ${Y}[*] Applying Real-Time Python Enhancement Booster...${N}"
+        apply_enhancement_booster
+        sync_host_config
+        get_booster_verdict_and_score
+        echo -e " ${G}[✓] Booster Verdict : ${BOOSTER_VERDICT} (${BOOSTER_SCORE}/100 [${BOOSTER_TIER}])${N}"
+        trigger_auto_reboot "SNI | Proxy | Host saved & Enhancement Booster applied!"
+        ;;
+      0)
+        rm -f "$STAGED_FILE"
+        break
+        ;;
+      *)
+        echo -e "\n ${R}[!] Invalid option!${N}"
+        sleep 1
+        ;;
+    esac
+  done
 }
 
 count_packages() {
@@ -199,7 +785,7 @@ verify_account_package() {
 }
 
 trigger_auto_reboot() {
-  local REASON="${1:-Applying package configuration...}"
+  local REASON="${1:-Applying configuration...}"
   echo ""
   echo -e " ${G}[✓] ${REASON}${N}"
   echo -e " ${C}╠══════════════════════════════════════════════╣${N}"
@@ -227,9 +813,16 @@ apply_save_action() {
 
 sync_host_config() {
   [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+  init_packages_store
   SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -z "$HOST" ] && HOST="$SERVER_IP"
   [ -z "$NAMESERVER" ] && NAMESERVER="$HOST"
+
+  # Build dynamic server_name list including all SNI | Proxy | Host entries
+  local EXTRA_HOSTS=""
+  if [ -s "$SNI_PROXY_HOST_FILE" ]; then
+    EXTRA_HOSTS=$(tr '\n' ' ' < "$SNI_PROXY_HOST_FILE")
+  fi
 
   # Enable TCP keepalive & low-latency tuning at kernel/sysctl level
   sysctl -w net.ipv4.tcp_keepalive_time=60 net.ipv4.tcp_keepalive_intvl=15 net.ipv4.tcp_keepalive_probes=4 > /dev/null 2>&1 || true
@@ -238,7 +831,7 @@ sync_host_config() {
     cat > "$NGINX_V2RAY_CONF" << NGINXEOF
 server {
     listen 8880;
-    server_name ${HOST} _;
+    server_name ${HOST} ${EXTRA_HOSTS} _;
     tcp_nodelay on;
 
     set \$target_host \$http_host;
@@ -348,8 +941,11 @@ update_host_domain() {
 
 load_config() {
   init_packages_store
+  install_booster_python
   if [ -f "$CONFIG_FILE" ]; then
+    ensure_default_toggles
     source "$CONFIG_FILE"
+    [ "${BOOSTER_ENABLED:-ON}" == "ON" ] && apply_enhancement_booster
     sync_host_config
   else
     first_run_setup
@@ -394,12 +990,14 @@ get_info() {
   fi
 
   PKG_COUNT=$(count_packages)
+  SNI_COUNT=$(grep -c '[^[:space:]]' "$SNI_PROXY_HOST_FILE" 2>/dev/null || echo 0)
   REBOOT_TOGGLE_STATE=$(get_auto_reboot_state)
   TOTAL_ACCOUNTS=$(( ${SSH_ACCOUNTS} + ${V2RAY_ACCOUNTS} ))
   CPU_CORES=$(nproc 2>/dev/null || echo 1)
   CPU_LOAD=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "0")
   SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -z "$HOST" ] && HOST="$SERVER_IP"
+  get_booster_verdict_and_score
 }
 
 # ══════════════════════════════════════════════
@@ -703,13 +1301,24 @@ first_run_setup() {
       PUBKEY_TYPE="default"
       ;;
   esac
-  echo "HOST=$INPUT_HOST" > "$CONFIG_FILE"
-  echo "NAMESERVER=$INPUT_NS" >> "$CONFIG_FILE"
-  echo "PUBKEY=$INPUT_PUBKEY" >> "$CONFIG_FILE"
-  echo "PUBKEY_TYPE=$PUBKEY_TYPE" >> "$CONFIG_FILE"
-  echo "AUTO_REBOOT_ON_SAVE=ON" >> "$CONFIG_FILE"
+  cat > "$CONFIG_FILE" << CFGINIT
+HOST=$INPUT_HOST
+NAMESERVER=$INPUT_NS
+PUBKEY=$INPUT_PUBKEY
+PUBKEY_TYPE=$PUBKEY_TYPE
+AUTO_REBOOT_ON_SAVE=ON
+PROTO_SSH=ON
+PROTO_OVPN=ON
+PROTO_SSL=ON
+PROTO_MUX=ON
+PROTO_WS=ON
+PROTO_NGINX=ON
+PROTO_XRAY=ON
+PROTO_DNSTT=ON
+BOOSTER_ENABLED=ON
+CFGINIT
   source "$CONFIG_FILE"
-  echo -e " ${G}[✓] Configuration saved! Starting installation...${N}"
+  echo -e " ${G}[✓] Configuration saved! All protocols defaulted to ON. Starting installation...${N}"
   sleep 1
   install_all
 }
@@ -722,7 +1331,7 @@ install_python_deps() {
   echo -e " ${Y}[*] Installing Python 3, qrencode & system packages...${N}"
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-pip python3-venv python3-setuptools qrencode \
-    openssh-server curl wget openssl net-tools psmisc \
+    openssh-server curl wget openssl net-tools psmisc iproute2 \
     openvpn easy-rsa iptables-persistent > /dev/null 2>&1
 
   python3 -m pip install --break-system-packages --quiet websockets requests qrcode 2>/dev/null || true
@@ -929,6 +1538,7 @@ install_all() {
     apt-get update -y
     install_python_deps
     init_packages_store
+    install_booster_python
 
     systemctl stop apache2 > /dev/null 2>&1
     systemctl disable apache2 > /dev/null 2>&1
@@ -959,7 +1569,7 @@ install_all() {
     sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
     sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 
-    printf "vantricks Script v0.6.0 - Unified SSH/OVPN + Xray WS + Package Gate\n" > /etc/ssh/banner.txt
+    printf "vantricks Script v0.7.0 - Unified SSH/OVPN + Xray WS + Real-Time Booster\n" > /etc/ssh/banner.txt
     sed -i '/^Banner/d' /etc/ssh/sshd_config
     echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
     systemctl enable ssh > /dev/null 2>&1
@@ -973,6 +1583,7 @@ install_all() {
     install_openvpn
     install_v2ray_auto
     install_custom_openssh
+    apply_enhancement_booster
 
     cp "$(realpath "$0")" /root/vantricks-script.sh
     chmod +x /root/vantricks-script.sh
@@ -1007,6 +1618,11 @@ if [ -f "$CONFIG_FILE" ]; then
     if [ "$STATUS" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
   }
 
+  B_INFO=$(python3 /usr/local/bin/vantricks-booster.py summary 2>/dev/null || echo "90|S+|ULTRA BOOSTED")
+  B_SCORE=$(echo "$B_INFO" | cut -d'|' -f1)
+  B_TIER=$(echo "$B_INFO" | cut -d'|' -f2)
+  B_VERDICT=$(echo "$B_INFO" | cut -d'|' -f3)
+
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${W}            ⚡ PORTS INFORMATION ⚡                ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
@@ -1032,6 +1648,7 @@ if [ -f "$CONFIG_FILE" ]; then
   echo -e " IP         : ${G}$SERVER_IP${N}"
   echo -e " Host       : ${G}$HOST${N}"
   echo -e " NS         : ${G}$NAMESERVER${N}"
+  echo -e " Booster    : ${G}${B_VERDICT} (${B_SCORE}/100 [${B_TIER}])${N}"
   echo -e " Public Key : ${G}${DNSTT_PUBKEY}${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${W}       ➤  Main Command: menu                    ${N}"
@@ -1052,6 +1669,7 @@ echo "nameserver 8.8.8.8" > /etc/resolv.conf
 echo "nameserver 8.8.4.4" >> /etc/resolv.conf
 chattr +i /etc/resolv.conf > /dev/null 2>&1
 sleep 3
+[ -x /usr/local/bin/vantricks-booster.py ] && python3 /usr/local/bin/vantricks-booster.py apply > /dev/null 2>&1
 systemctl restart ssh > /dev/null 2>&1
 systemctl restart openvpn@server openvpn@server-tcp > /dev/null 2>&1
 systemctl restart stunnel4 > /dev/null 2>&1
@@ -1111,6 +1729,7 @@ show_summary() {
   source "$CONFIG_FILE" 2>/dev/null
   SERVER_IP=$(hostname -I | awk '{print $1}')
   [ -z "$HOST" ] && HOST="$SERVER_IP"
+  get_booster_verdict_and_score
 
   svc_status() {
     STATUS=$(systemctl is-active "$1" 2>/dev/null)
@@ -1149,6 +1768,7 @@ show_summary() {
   echo -e " IP         : ${G}$SERVER_IP${N}"
   echo -e " Host       : ${G}$HOST${N}"
   echo -e " NS         : ${G}$NAMESERVER${N}"
+  echo -e " Booster    : ${G}${BOOSTER_VERDICT} (${BOOSTER_SCORE}/100 [${BOOSTER_TIER}])${N}"
   echo -e " Public Key : ${G}${DNSTT_PUBKEY}${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${W}          ➤  Main Command: menu                 ${N}"
@@ -1679,6 +2299,7 @@ SVCEOF
 
 main_menu() {
   while true; do
+    ensure_default_toggles
     auto_remove_expired
     sync_host_config
     get_info
@@ -1694,6 +2315,7 @@ main_menu() {
     WS_S=$(systemctl is-active ws-proxy-8080 2>/dev/null)
     XRAY_S=$(systemctl is-active xray 2>/dev/null)
     NGX_S=$(systemctl is-active nginx 2>/dev/null)
+    DNSTT_S=$(systemctl is-active dnstt 2>/dev/null)
 
     [ "$SSH_S" == "active" ]  && SSH_DOT="${G}ON${N}"  || SSH_DOT="${R}OFF${N}"
     ( [ "$OVPN_U_S" == "active" ] || [ "$OVPN_T_S" == "active" ] ) && OVPN_DOT="${G}ON${N}" || OVPN_DOT="${R}OFF${N}"
@@ -1702,11 +2324,20 @@ main_menu() {
     [ "$WS_S" == "active" ]   && WS_DOT="${G}ON${N}"   || WS_DOT="${R}OFF${N}"
     [ "$XRAY_S" == "active" ] && XRAY_DOT="${G}ON${N}" || XRAY_DOT="${R}OFF${N}"
     [ "$NGX_S" == "active" ]  && NGX_DOT="${G}ON${N}"  || NGX_DOT="${R}OFF${N}"
+    [ "$DNSTT_S" == "active" ] && DNSTT_DOT="${G}ON${N}" || DNSTT_DOT="${R}OFF${N}"
 
     if [ "${PKG_COUNT:-0}" -gt 0 ]; then
-      PKG_STATUS_DISP="${G}${PKG_COUNT} Active${N} | Reboot: ${G}${REBOOT_TOGGLE_STATE}${N}"
+      PKG_STATUS_DISP="${G}${PKG_COUNT} Active${N} | SNI/Host: ${G}${SNI_COUNT}${N}"
     else
-      PKG_STATUS_DISP="${R}NONE${N} | Reboot: ${Y}${REBOOT_TOGGLE_STATE}${N}"
+      PKG_STATUS_DISP="${R}NONE${N} | SNI/Host: ${G}${SNI_COUNT}${N}"
+    fi
+
+    if [ "${BOOSTER_SCORE:-0}" -ge 80 ]; then
+      BOOST_COL="$G"
+    elif [ "${BOOSTER_SCORE:-0}" -ge 55 ]; then
+      BOOST_COL="$Y"
+    else
+      BOOST_COL="$R"
     fi
 
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
@@ -1719,6 +2350,8 @@ main_menu() {
     echo -e "${C}║${N} ${Y}●${N} IP VPS   : ${W}$SERVER_IP${N}"
     echo -e "${C}║${N} ${Y}●${N} Domain   : ${W}$HOST${N}"
     echo -e "${C}║${N} ${Y}●${N} Packages : $PKG_STATUS_DISP"
+    echo -e "${C}║${N} ${Y}●${N} Strength : ${BOOST_COL}${BOOSTER_SCORE}/100 [${BOOSTER_TIER}]${N}"
+    echo -e "${C}║${N} ${Y}●${N} Verdict  : ${BOOST_COL}${BOOSTER_VERDICT}${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}         ${W}❱❱ ACCOUNT INFORMATION ❰❰${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
@@ -1730,14 +2363,16 @@ main_menu() {
     echo -e "${C}║${N}  SSH         : $SSH_DOT       OPENVPN     : $OVPN_DOT"
     echo -e "${C}║${N}  SSL         : $SSL_DOT       MULTIPLEXER : $MUX_DOT"
     echo -e "${C}║${N}  WEBSOCKET   : $WS_DOT       NGINX       : $NGX_DOT"
-    echo -e "${C}║${N}  XRAY        : $XRAY_DOT"
+    echo -e "${C}║${N}  XRAY        : $XRAY_DOT       DNSTT       : $DNSTT_DOT"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}            ${W}❱❱ MAIN MENU ❰❰${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[1]${N} SSH + OVPN Menu    ${W}[4]${N} Restart Services"
-    echo -e "${C}║${N}  ${W}[2]${N} V2Ray/Xray Menu    ${W}[5]${N} Server Info"
-    echo -e "${C}║${N}  ${W}[3]${N} Services Status    ${W}[6]${N} Package Manager"
-    echo -e "${C}║${N}  ${W}[7]${N} Update Host Domain ${W}[0]${N} Exit"
+    echo -e "${C}║${N}  ${W}[1]${N} SSH + OVPN Menu    ${W}[6]${N} Package Manager"
+    echo -e "${C}║${N}  ${W}[2]${N} V2Ray/Xray Menu    ${W}[7]${N} Update Host Domain"
+    echo -e "${C}║${N}  ${W}[3]${N} Services Status    ${W}[8]${N} SNI | Proxy | Host"
+    echo -e "${C}║${N}  ${W}[4]${N} Restart Services   ${W}[9]${N} Protocol Toggles (ON)"
+    echo -e "${C}║${N}  ${W}[5]${N} Server Info        ${W}[10]${N} Live Booster Monitor"
+    echo -e "${C}║${N}  ${W}[0]${N} Exit"
     echo -e "${C}╚══════════════════════════════════════════════╝${N}"
     read -p " Option >>> " OPT
     case $OPT in
@@ -1748,6 +2383,9 @@ main_menu() {
       5) show_summary; press_enter ;;
       6) package_menu ;;
       7) update_host_domain ;;
+      8) sni_proxy_host_menu ;;
+      9) protocol_toggles_menu ;;
+      10) python3 "$BOOSTER_SCRIPT" live ;;
       0) clear; exit 0 ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
     esac
@@ -2088,6 +2726,7 @@ check_services() {
 
 restart_services() {
   sync_host_config
+  apply_enhancement_booster
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
   echo -e "${C}║${N}          ${W}RESTARTING SERVICES${N}               ${C}║${N}"
@@ -2118,6 +2757,7 @@ restart_services() {
   echo -e " ${G}[✓]${N} WebSocket restarted"
   systemctl restart xray > /dev/null 2>&1
   echo -e " ${G}[✓]${N} Xray (VMess/VLESS/Trojan WS) restarted"
+  echo -e " ${G}[✓]${N} Python Enhancement Booster re-applied"
   echo ""
   echo -e "${C}╚══════════════════════════════════════════════╝${N}"
   press_enter
