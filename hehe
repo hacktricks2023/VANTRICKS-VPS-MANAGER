@@ -16,12 +16,14 @@ N='\033[0m'
 DIV="════════════════════════════════════════════════"
 CONFIG_FILE="/etc/vantricks_script.conf"
 PACKAGES_FILE="/etc/vantricks_packages.list"
+ACCOUNT_PKG_DB="/etc/vantricks_account_packages.db"
 OVPN_DIR="/etc/openvpn/server"
 OVPN_CLIENT_DIR="/etc/openvpn/client"
 XRAY_CONF="/usr/local/etc/xray/config.json"
 XRAY_DB="/etc/xray/accounts.db"
 NGINX_V2RAY_CONF="/etc/nginx/conf.d/v2ray.conf"
 SERVER_ERROR_MSG="Server error contact owner vantricks team."
+AUTO_REBOOT_ON_SAVE="ON"
 
 # ── PASSWORD CHECK ────────────────────────────────
 check_password() {
@@ -72,8 +74,40 @@ check_os() {
 
 init_packages_store() {
   mkdir -p /etc
-  touch "$PACKAGES_FILE"
+  touch "$PACKAGES_FILE" "$ACCOUNT_PKG_DB"
   sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE" 2>/dev/null || true
+}
+
+get_auto_reboot_state() {
+  [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+  if [ "${AUTO_REBOOT_ON_SAVE^^}" == "OFF" ]; then
+    echo "OFF"
+  else
+    echo "ON"
+  fi
+}
+
+set_auto_reboot_state() {
+  local NEW_STATE="${1^^}"
+  [ "$NEW_STATE" != "ON" ] && NEW_STATE="OFF"
+  mkdir -p /etc
+  touch "$CONFIG_FILE"
+  sed -i '/^AUTO_REBOOT_ON_SAVE=/d' "$CONFIG_FILE" 2>/dev/null || true
+  echo "AUTO_REBOOT_ON_SAVE=$NEW_STATE" >> "$CONFIG_FILE"
+  AUTO_REBOOT_ON_SAVE="$NEW_STATE"
+}
+
+toggle_auto_reboot() {
+  local CUR
+  CUR=$(get_auto_reboot_state)
+  if [ "$CUR" == "ON" ]; then
+    set_auto_reboot_state "OFF"
+    echo -e "\n ${Y}[✓] Auto Reboot on Save is now: OFF${N}"
+  else
+    set_auto_reboot_state "ON"
+    echo -e "\n ${G}[✓] Auto Reboot on Save is now: ON${N}"
+  fi
+  sleep 1
 }
 
 count_packages() {
@@ -81,14 +115,84 @@ count_packages() {
   grep -c '[^[:space:]]' "$PACKAGES_FILE" 2>/dev/null || echo 0
 }
 
-verify_package_gate() {
-  local PKG_CNT
-  PKG_CNT=$(count_packages)
-  if [ "$PKG_CNT" -le 0 ]; then
+is_package_in_list() {
+  local TARGET_PKG="$1"
+  init_packages_store
+  [ -z "$TARGET_PKG" ] && return 1
+  grep -Fxq "$TARGET_PKG" "$PACKAGES_FILE" 2>/dev/null
+}
+
+get_account_package() {
+  local PROTO_KEY="$1"
+  local ACCT_ID="$2"
+  init_packages_store
+  awk -F'|' -v p="$PROTO_KEY" -v u="$ACCT_ID" '$1==p && $2==u {print $3; exit}' "$ACCOUNT_PKG_DB"
+}
+
+set_account_package() {
+  local PROTO_KEY="$1"
+  local ACCT_ID="$2"
+  local PKG_NAME="$3"
+  init_packages_store
+  local TMP
+  TMP=$(mktemp)
+  awk -F'|' -v p="$PROTO_KEY" -v u="$ACCT_ID" '!($1==p && $2==u)' "$ACCOUNT_PKG_DB" > "$TMP" 2>/dev/null || true
+  echo "${PROTO_KEY}|${ACCT_ID}|${PKG_NAME}" >> "$TMP"
+  mv "$TMP" "$ACCOUNT_PKG_DB"
+}
+
+remove_account_package() {
+  local PROTO_KEY="$1"
+  local ACCT_ID="$2"
+  init_packages_store
+  local TMP
+  TMP=$(mktemp)
+  awk -F'|' -v p="$PROTO_KEY" -v u="$ACCT_ID" '!($1==p && $2==u)' "$ACCOUNT_PKG_DB" > "$TMP" 2>/dev/null || true
+  mv "$TMP" "$ACCOUNT_PKG_DB"
+}
+
+select_package_for_account() {
+  init_packages_store
+  local CNT
+  CNT=$(count_packages)
+  if [ "$CNT" -le 0 ]; then
     echo ""
     echo -e " ${R}[!] ${SERVER_ERROR_MSG}${N}"
-    echo -e " ${Y}[i] Add a package name in [6] Package Manager first.${N}"
     sleep 2
+    return 1
+  fi
+
+  mapfile -t PKGS < "$PACKAGES_FILE"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e " ${W}Select Package Name (Required):${N}"
+  local idx=1
+  for p in "${PKGS[@]}"; do
+    echo -e "  ${W}[$idx]${N} ${G}${p}${N}"
+    idx=$((idx + 1))
+  done
+  read -p "  Package # : " P_SEL
+
+  if ! [[ "$P_SEL" =~ ^[0-9]+$ ]] || [ "$P_SEL" -lt 1 ] || [ "$P_SEL" -gt "${#PKGS[@]}" ]; then
+    echo -e "\n ${R}[!] ${SERVER_ERROR_MSG}${N}"
+    sleep 2
+    return 1
+  fi
+
+  SELECTED_PACKAGE="${PKGS[$((P_SEL - 1))]}"
+  if ! is_package_in_list "$SELECTED_PACKAGE"; then
+    echo -e "\n ${R}[!] ${SERVER_ERROR_MSG}${N}"
+    sleep 2
+    return 1
+  fi
+  return 0
+}
+
+verify_account_package() {
+  local PROTO_KEY="$1"
+  local ACCT_ID="$2"
+  local ASSIGNED_PKG
+  ASSIGNED_PKG=$(get_account_package "$PROTO_KEY" "$ACCT_ID")
+  if [ -z "$ASSIGNED_PKG" ] || ! is_package_in_list "$ASSIGNED_PKG"; then
     return 1
   fi
   return 0
@@ -109,18 +213,33 @@ trigger_auto_reboot() {
   reboot
 }
 
+apply_save_action() {
+  local REASON="${1:-Configuration saved.}"
+  local STATE
+  STATE=$(get_auto_reboot_state)
+  if [ "$STATE" == "ON" ]; then
+    trigger_auto_reboot "$REASON"
+  else
+    echo -e "\n ${G}[✓] ${REASON} (Auto Reboot is OFF)${N}"
+    sleep 1
+  fi
+}
+
 sync_host_config() {
   [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
   SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -z "$HOST" ] && HOST="$SERVER_IP"
   [ -z "$NAMESERVER" ] && NAMESERVER="$HOST"
 
-  # Ensure Nginx v2ray reverse proxy uses current $HOST and proxy headers
+  # Enable TCP keepalive & low-latency tuning at kernel/sysctl level
+  sysctl -w net.ipv4.tcp_keepalive_time=60 net.ipv4.tcp_keepalive_intvl=15 net.ipv4.tcp_keepalive_probes=4 > /dev/null 2>&1 || true
+
   if [ -d /etc/nginx/conf.d ]; then
     cat > "$NGINX_V2RAY_CONF" << NGINXEOF
 server {
     listen 8880;
     server_name ${HOST} _;
+    tcp_nodelay on;
 
     set \$target_host \$http_host;
     if (\$target_host = "") {
@@ -135,8 +254,9 @@ server {
         proxy_set_header Host \$target_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header CF-Connecting-IP \$http_cf_connecting_ip;
-        proxy_read_timeout 86400;
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
     }
 
     location /vless {
@@ -147,8 +267,9 @@ server {
         proxy_set_header Host \$target_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header CF-Connecting-IP \$http_cf_connecting_ip;
-        proxy_read_timeout 86400;
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
     }
 
     location /trojan {
@@ -159,8 +280,9 @@ server {
         proxy_set_header Host \$target_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header CF-Connecting-IP \$http_cf_connecting_ip;
-        proxy_read_timeout 86400;
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
     }
 
     location / {
@@ -171,8 +293,9 @@ server {
         proxy_set_header Host \$target_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header CF-Connecting-IP \$http_cf_connecting_ip;
-        proxy_read_timeout 86400;
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
         add_header Upgrade "websocket" always;
         add_header Connection "Upgrade" always;
         add_header Sec-WebSocket-Version "13" always;
@@ -182,6 +305,45 @@ server {
 NGINXEOF
     nginx -t > /dev/null 2>&1 && systemctl reload nginx > /dev/null 2>&1 || true
   fi
+}
+
+update_host_domain() {
+  [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+  clear
+  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+  echo -e "${C}║${N}        ${W}UPDATE HOST DOMAIN & SYNC SERVICES${N}      ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  Current Host : ${G}${HOST:-N/A}${N}"
+  echo -e "${C}║${N}  Current NS   : ${G}${NAMESERVER:-N/A}${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  read -p "  New Host Domain : " NEW_HOST
+  read -p "  New NS (or Enter to keep): " NEW_NS
+
+  if [ -z "$NEW_HOST" ]; then
+    echo -e " ${R}[!] Host domain cannot be empty!${N}"
+    sleep 2; return
+  fi
+
+  NEW_NS="${NEW_NS:-$NAMESERVER}"
+  NEW_NS="${NEW_NS:-$NEW_HOST}"
+
+  sed -i '/^HOST=/d; /^NAMESERVER=/d' "$CONFIG_FILE"
+  echo "HOST=$NEW_HOST" >> "$CONFIG_FILE"
+  echo "NAMESERVER=$NEW_NS" >> "$CONFIG_FILE"
+
+  # Regenerate existing client OVPN profiles with the updated host
+  if [ -d "$OVPN_CLIENT_DIR" ]; then
+    for ovpn in "${OVPN_CLIENT_DIR}"/*-tcp443.ovpn; do
+      [ -f "$ovpn" ] || continue
+      u_name=$(basename "$ovpn" "-tcp443.ovpn")
+      generate_ovpn_profile "$u_name"
+    done
+  fi
+
+  sync_host_config
+  systemctl restart ws-proxy-8080 xray > /dev/null 2>&1
+  echo -e "\n ${G}[✓] Host updated to '$NEW_HOST' and services synced!${N}"
+  press_enter
 }
 
 load_config() {
@@ -232,6 +394,7 @@ get_info() {
   fi
 
   PKG_COUNT=$(count_packages)
+  REBOOT_TOGGLE_STATE=$(get_auto_reboot_state)
   TOTAL_ACCOUNTS=$(( ${SSH_ACCOUNTS} + ${V2RAY_ACCOUNTS} ))
   CPU_CORES=$(nproc 2>/dev/null || echo 1)
   CPU_LOAD=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "0")
@@ -240,14 +403,18 @@ get_info() {
 }
 
 # ══════════════════════════════════════════════
-#   PACKAGE NAME MANAGER (ADD / LIST / SAVE / EDIT / DELETE / REBOOT)
+#   PACKAGE NAME MANAGER (ADD / LIST / SAVE / EDIT / DELETE / TOGGLE / REBOOT)
 # ══════════════════════════════════════════════
 
 add_package_name() {
   init_packages_store
+  local RSTATE
+  RSTATE=$(get_auto_reboot_state)
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
   echo -e "${C}║${N}            ${W}ADD PACKAGE NAME${N}                    ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  Auto Reboot on Save : ${G}${RSTATE}${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   read -p "  Enter Package Name : " PKG_INPUT
   PKG_INPUT=$(echo "$PKG_INPUT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -260,14 +427,14 @@ add_package_name() {
 
   echo ""
   echo -e " Package to add : ${G}${PKG_INPUT}${N}"
-  echo -e " ${W}[s]${N} Save & Auto Reboot    ${W}[c]${N} Cancel"
+  echo -e " ${W}[s]${N} Save (Auto Reboot: ${RSTATE})    ${W}[c]${N} Cancel"
   read -p " Action >>> " SAVE_ACT
 
   case "$SAVE_ACT" in
     s|S|y|Y)
       echo "$PKG_INPUT" >> "$PACKAGES_FILE"
       sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
-      trigger_auto_reboot "Saved package '${PKG_INPUT}'. Rebooting to apply..."
+      apply_save_action "Saved package '${PKG_INPUT}'."
       ;;
     *)
       echo -e "\n ${Y}[!] Cancelled. Package not saved.${N}"
@@ -306,7 +473,8 @@ edit_package_name() {
   PKGS[$ARR_POS]="$NEW_PKG"
   printf "%s\n" "${PKGS[@]}" > "$PACKAGES_FILE"
   sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
-  echo -e "\n ${G}[✓] Updated #${EDIT_IDX} to '${NEW_PKG}'. Press [s] to Save & Reboot or [r] to Reboot.${N}"
+  awk -F'|' -v old="$OLD_PKG" -v new="$NEW_PKG" 'BEGIN{OFS="|"} {if ($3==old) $3=new; print}' "$ACCOUNT_PKG_DB" > "${ACCOUNT_PKG_DB}.tmp" && mv "${ACCOUNT_PKG_DB}.tmp" "$ACCOUNT_PKG_DB"
+  echo -e "\n ${G}[✓] Updated #${EDIT_IDX} to '${NEW_PKG}'.${N}"
   sleep 1
 }
 
@@ -335,15 +503,19 @@ delete_package_name() {
     : > "$PACKAGES_FILE"
   fi
   sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
-  echo -e "\n ${G}[✓] Deleted package '${REM_PKG}'.${N}"
+  echo -e "\n ${G}[✓] Deleted package '${REM_PKG}'. Accounts using it will report error until updated.${N}"
   sleep 1
 }
 
 list_package_names_view() {
   init_packages_store
+  local RSTATE
+  RSTATE=$(get_auto_reboot_state)
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
   echo -e "${C}║${N}            ${W}LIST PACKAGE NAMES${N}                  ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  Auto Reboot on Save : ${G}${RSTATE}${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
 
   mapfile -t PKGS < "$PACKAGES_FILE"
@@ -358,9 +530,9 @@ list_package_names_view() {
   fi
 
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${C}║${N}  ${W}[s]${N} Save & Reboot    ${W}[e]${N} Edit Package     ${C}║${N}"
-  echo -e "${C}║${N}  ${W}[d]${N} Delete Package   ${W}[r]${N} Reboot Now       ${C}║${N}"
-  echo -e "${C}║${N}  ${W}[0]${N} Back                                      ${C}║${N}"
+  echo -e "${C}║${N}  ${W}[s]${N} Save & Apply     ${W}[e]${N} Edit Package     ${C}║${N}"
+  echo -e "${C}║${N}  ${W}[d]${N} Delete Package   ${W}[t]${N} Toggle Reboot    ${C}║${N}"
+  echo -e "${C}║${N}  ${W}[r]${N} Reboot Now       ${W}[0]${N} Back             ${C}║${N}"
   echo -e "${C}╚══════════════════════════════════════════════╝${N}"
 }
 
@@ -368,24 +540,26 @@ package_menu() {
   while true; do
     init_packages_store
     clear
-    local CNT
+    local CNT RSTATE
     CNT=$(count_packages)
+    RSTATE=$(get_auto_reboot_state)
 
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
     echo -e "${C}║${N}       ${W}PACKAGE NAME & SET-UP MANAGER${N}            ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     if [ "$CNT" -le 0 ]; then
-      echo -e "${C}║${N}  Status : ${R}${SERVER_ERROR_MSG}${N}"
+      echo -e "${C}║${N}  Status      : ${R}${SERVER_ERROR_MSG}${N}"
     else
-      echo -e "${C}║${N}  Status : ${G}${CNT} Active Package(s) Ready${N}"
+      echo -e "${C}║${N}  Status      : ${G}${CNT} Active Package(s) Ready${N}"
     fi
+    echo -e "${C}║${N}  Auto Reboot : ${G}${RSTATE}${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[1]${N} Add Package Name (Save + Auto Reboot)   ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} Add Package Name                         ${C}║${N}"
     echo -e "${C}║${N}  ${W}[2]${N} Show List Package Name                   ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[s]${N} Save & Reboot    ${W}[e]${N} Edit Package     ${C}║${N}"
-    echo -e "${C}║${N}  ${W}[d]${N} Delete Package   ${W}[r]${N} Reboot Now       ${C}║${N}"
-    echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                        ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[s]${N} Save & Apply     ${W}[e]${N} Edit Package     ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[d]${N} Delete Package   ${W}[t]${N} Toggle Reboot    ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[r]${N} Reboot Now       ${W}[0]${N} Back             ${C}║${N}"
     echo -e "${C}╚══════════════════════════════════════════════╝${N}"
     read -p " Option >>> " POPT
 
@@ -400,13 +574,16 @@ package_menu() {
           case "$LACT" in
             s|S)
               sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
-              trigger_auto_reboot "Package list saved. Rebooting to apply..."
+              apply_save_action "Package list saved."
               ;;
             e|E)
               edit_package_name
               ;;
             d|D)
               delete_package_name
+              ;;
+            t|T)
+              toggle_auto_reboot
               ;;
             r|R)
               trigger_auto_reboot "Rebooting server..."
@@ -423,7 +600,7 @@ package_menu() {
         ;;
       s|S)
         sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
-        trigger_auto_reboot "Package configuration saved. Rebooting to apply..."
+        apply_save_action "Package configuration saved."
         ;;
       e|E)
         list_package_names_view
@@ -432,6 +609,9 @@ package_menu() {
       d|D)
         list_package_names_view
         delete_package_name
+        ;;
+      t|T)
+        toggle_auto_reboot
         ;;
       r|R)
         trigger_auto_reboot "Rebooting server..."
@@ -462,6 +642,7 @@ auto_remove_expired() {
         if [ -n "$EXP_S" ] && [ "$EXP_S" -lt "$NOW_S" ]; then
           sed -i "/Match User $user/,/MaxSessions/d" /etc/ssh/sshd_config 2>/dev/null
           rm -f "${OVPN_CLIENT_DIR}/${user}-tcp443.ovpn" "${OVPN_CLIENT_DIR}/${user}-udp1194.ovpn" "${OVPN_CLIENT_DIR}/${user}.ovpn" 2>/dev/null
+          remove_account_package "ssh_ovpn" "$user"
           userdel -r "$user" > /dev/null 2>&1
         fi
       fi
@@ -472,15 +653,21 @@ auto_remove_expired() {
     TMP=$(mktemp)
     while IFS= read -r line; do
       [ -z "$line" ] && continue
+      vuser=$(echo "$line" | awk '{print $1}')
+      vuuid=$(echo "$line" | awk '{print $2}')
       NCOLS=$(echo "$line" | awk '{print NF}')
       if [ "$NCOLS" -ge 5 ]; then
         vexpiry=$(echo "$line" | awk '{print $3" "$4}')
+        vproto=$(echo "$line" | awk '{print $5}')
       else
         vexpiry=$(echo "$line" | awk '{print $3}')
+        vproto=$(echo "$line" | awk '{print $4}')
       fi
       EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null || echo 0)
       if [ "$EXP_S" -gt "$NOW_S" ]; then
         echo "$line" >> "$TMP"
+      else
+        remove_account_package "${vproto:-xray}" "$vuuid"
       fi
     done < "$XRAY_DB"
     mv "$TMP" "$XRAY_DB"
@@ -520,6 +707,7 @@ first_run_setup() {
   echo "NAMESERVER=$INPUT_NS" >> "$CONFIG_FILE"
   echo "PUBKEY=$INPUT_PUBKEY" >> "$CONFIG_FILE"
   echo "PUBKEY_TYPE=$PUBKEY_TYPE" >> "$CONFIG_FILE"
+  echo "AUTO_REBOOT_ON_SAVE=ON" >> "$CONFIG_FILE"
   source "$CONFIG_FILE"
   echo -e " ${G}[✓] Configuration saved! Starting installation...${N}"
   sleep 1
@@ -771,7 +959,7 @@ install_all() {
     sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
     sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 
-    printf "vantricks Script v0.5.0 - Unified SSH/OVPN + Xray WS + Package Manager\n" > /etc/ssh/banner.txt
+    printf "vantricks Script v0.6.0 - Unified SSH/OVPN + Xray WS + Package Gate\n" > /etc/ssh/banner.txt
     sed -i '/^Banner/d' /etc/ssh/sshd_config
     echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
     systemctl enable ssh > /dev/null 2>&1
@@ -1009,7 +1197,16 @@ RESPONSE_PLAIN = (
     b"\r\n"
 )
 
+def enable_keepalive(sock):
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
+
 def forward(src, dst):
+    enable_keepalive(src)
+    enable_keepalive(dst)
     try:
         while True:
             r, _, _ = select.select([src], [], [], TIMEOUT)
@@ -1028,6 +1225,7 @@ def forward(src, dst):
                 pass
 
 def handle(client):
+    enable_keepalive(client)
     try:
         data = client.recv(BUFFER)
         if not data:
@@ -1041,6 +1239,7 @@ def handle(client):
 
         if is_v2ray:
             target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            enable_keepalive(target)
             target.connect((SSH_HOST, NGINX_PORT))
             target.sendall(data)
             threading.Thread(target=forward, args=(client, target), daemon=True).start()
@@ -1051,6 +1250,7 @@ def handle(client):
             return
         else:
             target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            enable_keepalive(target)
             target.connect((SSH_HOST, SSH_PORT))
             if is_http:
                 client.send(RESPONSE_COLOR)
@@ -1067,11 +1267,13 @@ def handle(client):
 def start(port):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    enable_keepalive(srv)
     srv.bind(('0.0.0.0', port))
     srv.listen(200)
     while True:
         try:
             c, _ = srv.accept()
+            enable_keepalive(c)
             threading.Thread(target=handle, args=(c,), daemon=True).start()
         except Exception:
             pass
@@ -1145,7 +1347,8 @@ install_v2ray_auto() {
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/vmess"
+          "path": "/vmess",
+          "heartbeatPeriod": 20
         }
       }
     },
@@ -1160,7 +1363,8 @@ install_v2ray_auto() {
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/vless"
+          "path": "/vless",
+          "heartbeatPeriod": 20
         }
       }
     },
@@ -1174,7 +1378,8 @@ install_v2ray_auto() {
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/trojan"
+          "path": "/trojan",
+          "heartbeatPeriod": 20
         }
       }
     }
@@ -1499,9 +1704,9 @@ main_menu() {
     [ "$NGX_S" == "active" ]  && NGX_DOT="${G}ON${N}"  || NGX_DOT="${R}OFF${N}"
 
     if [ "${PKG_COUNT:-0}" -gt 0 ]; then
-      PKG_STATUS_DISP="${G}${PKG_COUNT} Active${N}"
+      PKG_STATUS_DISP="${G}${PKG_COUNT} Active${N} | Reboot: ${G}${REBOOT_TOGGLE_STATE}${N}"
     else
-      PKG_STATUS_DISP="${R}NONE${N}"
+      PKG_STATUS_DISP="${R}NONE${N} | Reboot: ${Y}${REBOOT_TOGGLE_STATE}${N}"
     fi
 
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
@@ -1532,7 +1737,7 @@ main_menu() {
     echo -e "${C}║${N}  ${W}[1]${N} SSH + OVPN Menu    ${W}[4]${N} Restart Services"
     echo -e "${C}║${N}  ${W}[2]${N} V2Ray/Xray Menu    ${W}[5]${N} Server Info"
     echo -e "${C}║${N}  ${W}[3]${N} Services Status    ${W}[6]${N} Package Manager"
-    echo -e "${C}║${N}  ${W}[0]${N} Exit                                      ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[7]${N} Update Host Domain ${W}[0]${N} Exit"
     echo -e "${C}╚══════════════════════════════════════════════╝${N}"
     read -p " Option >>> " OPT
     case $OPT in
@@ -1542,6 +1747,7 @@ main_menu() {
       4) restart_services ;;
       5) show_summary; press_enter ;;
       6) package_menu ;;
+      7) update_host_domain ;;
       0) clear; exit 0 ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
     esac
@@ -1577,7 +1783,6 @@ ssh_ovpn_menu() {
 }
 
 create_ssh_ovpn_user() {
-  verify_package_gate || return
   sync_host_config
   SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   clear
@@ -1587,6 +1792,7 @@ create_ssh_ovpn_user() {
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Time : ${G}$DATETIME${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  select_package_for_account || return
   read -p "  Enter username: " NEW_USER
   read -p "  Enter password: " NEW_PASS
   read -p "  Expiration (days): " EXP_DAYS
@@ -1614,6 +1820,7 @@ create_ssh_ovpn_user() {
   useradd -m -s /bin/bash "$NEW_USER" > /dev/null 2>&1
   echo "${NEW_USER}:${NEW_PASS}" | chpasswd > /dev/null 2>&1
   chage -E "$EXP_DATE_SYSTEM" "$NEW_USER" > /dev/null 2>&1
+  set_account_package "ssh_ovpn" "$NEW_USER" "$SELECTED_PACKAGE"
 
   if ! grep -q "Match User $NEW_USER" /etc/ssh/sshd_config; then
     echo "" >> /etc/ssh/sshd_config
@@ -1633,6 +1840,7 @@ create_ssh_ovpn_user() {
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Username        : ${G}$NEW_USER${N}"
   echo -e "${C}║${N}  Password        : ${G}$NEW_PASS${N}"
+  echo -e "${C}║${N}  Package         : ${G}$SELECTED_PACKAGE${N}"
   echo -e "${C}║${N}  Expiration      : ${G}${EXP_DAYS} Day/s${N}"
   echo -e "${C}║${N}  Online Limit    : ${G}$MAX_SESSION${N}"
   echo -e "${C}║${N}  Expire Date     : ${G}$EXP_DATE_DISPLAY${N}"
@@ -1669,7 +1877,8 @@ remove_ssh_ovpn_user() {
         EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
         if [ "$EXP" == "never" ] || [ "$EXP_S" -gt "$NOW_S" ] 2>/dev/null; then
           SESS=$(ps aux | grep -c "sshd: $user@" 2>/dev/null || echo 0)
-          echo -e "${C}║${N}  ${W}[$INDEX]${N} $user  ${Y}|${N} Exp: ${G}$EXP${N}  ${Y}|${N} Online: ${G}$SESS${N}"
+          UPKG=$(get_account_package "ssh_ovpn" "$user")
+          echo -e "${C}║${N}  ${W}[$INDEX]${N} $user  ${Y}|${N} Pkg: ${G}${UPKG:-NONE}${N}  ${Y}|${N} Online: ${G}$SESS${N}"
           USERS+=("$user")
           INDEX=$((INDEX + 1))
         fi
@@ -1696,6 +1905,7 @@ remove_ssh_ovpn_user() {
             if [ "$EXP_S" -lt "$NOW_S" ]; then
               sed -i "/Match User $u/,/MaxSessions/d" /etc/ssh/sshd_config
               rm -f "${OVPN_CLIENT_DIR}/${u}-tcp443.ovpn" "${OVPN_CLIENT_DIR}/${u}-udp1194.ovpn" "${OVPN_CLIENT_DIR}/${u}.ovpn" 2>/dev/null
+              remove_account_package "ssh_ovpn" "$u"
               userdel -r "$u" > /dev/null 2>&1
               COUNT=$((COUNT + 1))
             fi
@@ -1709,6 +1919,7 @@ remove_ssh_ovpn_user() {
       for u in "${USERS[@]}"; do
         sed -i "/Match User $u/,/MaxSessions/d" /etc/ssh/sshd_config
         rm -f "${OVPN_CLIENT_DIR}/${u}-tcp443.ovpn" "${OVPN_CLIENT_DIR}/${u}-udp1194.ovpn" "${OVPN_CLIENT_DIR}/${u}.ovpn" 2>/dev/null
+        remove_account_package "ssh_ovpn" "$u"
         userdel -r "$u" > /dev/null 2>&1
       done
       systemctl restart ssh > /dev/null 2>&1
@@ -1718,6 +1929,7 @@ remove_ssh_ovpn_user() {
       TARGET="${USERS[$((DEL_OPT - 1))]}"
       sed -i "/Match User $TARGET/,/MaxSessions/d" /etc/ssh/sshd_config
       rm -f "${OVPN_CLIENT_DIR}/${TARGET}-tcp443.ovpn" "${OVPN_CLIENT_DIR}/${TARGET}-udp1194.ovpn" "${OVPN_CLIENT_DIR}/${TARGET}.ovpn" 2>/dev/null
+      remove_account_package "ssh_ovpn" "$TARGET"
       userdel -r "$TARGET" > /dev/null 2>&1
       systemctl restart ssh > /dev/null 2>&1
       echo -e "\n${G} [✓] User '$TARGET' (SSH + OVPN) deleted!${N}"
@@ -1746,7 +1958,8 @@ check_ssh_ovpn_user() {
         EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
         if [ "$EXP" == "never" ] || [ "$EXP_S" -gt "$NOW_S" ] 2>/dev/null; then
           SESS=$(ps aux | grep -c "sshd: $user@" 2>/dev/null || echo 0)
-          echo -e "${C}║${N}  ${W}[$INDEX]${N} $user  ${Y}|${N} Exp: ${G}$EXP${N}  ${Y}|${N} Online: ${G}$SESS${N}"
+          UPKG=$(get_account_package "ssh_ovpn" "$user")
+          echo -e "${C}║${N}  ${W}[$INDEX]${N} $user  ${Y}|${N} Pkg: ${G}${UPKG:-NONE}${N}  ${Y}|${N} Online: ${G}$SESS${N}"
           USERS+=("$user")
           INDEX=$((INDEX + 1))
         fi
@@ -1762,6 +1975,12 @@ check_ssh_ovpn_user() {
       break
     elif [[ "$CHK_OPT" =~ ^[0-9]+$ ]] && [ "$CHK_OPT" -ge 1 ] && [ "$CHK_OPT" -lt "$INDEX" ]; then
       CHK_USER="${USERS[$((CHK_OPT - 1))]}"
+      if ! verify_account_package "ssh_ovpn" "$CHK_USER"; then
+        echo -e "\n ${R}[!] ${SERVER_ERROR_MSG}${N}"
+        sleep 2
+        continue
+      fi
+      UPKG=$(get_account_package "ssh_ovpn" "$CHK_USER")
       EXP=$(chage -l "$CHK_USER" | grep "Account expires" | cut -d: -f2 | xargs)
       ONLINE=$(ps aux | grep -c "sshd: $CHK_USER@" 2>/dev/null || echo 0)
       MAXSESS=$(grep -A1 "Match User $CHK_USER" /etc/ssh/sshd_config | grep MaxSessions | awk '{print $2}')
@@ -1782,6 +2001,7 @@ check_ssh_ovpn_user() {
       echo -e "${C}║${N}         ${W}SSH + OVPN ACCOUNT DETAILS${N}           ${C}║${N}"
       echo -e "${C}╠══════════════════════════════════════════════╣${N}"
       echo -e "${C}║${N}  Username     : ${G}$CHK_USER${N}"
+      echo -e "${C}║${N}  Package      : ${G}$UPKG${N}"
       echo -e "${C}║${N}  Status       : $STATUS"
       echo -e "${C}║${N}  Online       : ${G}$ONLINE SSH session(s)${N}"
       echo -e "${C}║${N}  Max Session  : ${G}$MAXSESS${N}"
@@ -1805,7 +2025,7 @@ list_ssh_ovpn_users() {
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
   echo -e "${C}║${N}        ${W}ALL SSH + OPENVPN ACCOUNTS${N}              ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  printf "${C}║${N}  %-15s %-22s %-6s\n" "Username" "Expires" "Online"
+  printf "${C}║${N}  %-12s %-14s %-14s %-6s\n" "Username" "Package" "Expires" "On"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   COUNT=0
   NOW_S=$(date +%s)
@@ -1815,7 +2035,11 @@ list_ssh_ovpn_users() {
       EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
       if [ "$EXP" == "never" ] || [ "$EXP_S" -gt "$NOW_S" ] 2>/dev/null; then
         ONLINE=$(ps aux | grep -c "sshd: $user@" 2>/dev/null || echo 0)
-        printf "${C}║${N}  ${G}%-15s${N} %-22s %-6s\n" "$user" "$EXP" "$ONLINE"
+        UPKG=$(get_account_package "ssh_ovpn" "$user")
+        if ! verify_account_package "ssh_ovpn" "$user"; then
+          UPKG="ERR"
+        fi
+        printf "${C}║${N}  ${G}%-12s${N} %-14s %-14s %-6s\n" "$user" "$UPKG" "$EXP" "$ONLINE"
         COUNT=$((COUNT + 1))
       fi
     fi
@@ -1934,7 +2158,6 @@ v2ray_menu() {
 }
 
 v2ray_create_user() {
-  verify_package_gate || return
   while true; do
     clear
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
@@ -1969,6 +2192,7 @@ v2ray_create_account() {
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Time : ${G}$DATETIME${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  select_package_for_account || return
 
   if [ "$PROTO" == "trojan" ]; then
     read -p "  Enter password: " V2_PASSWORD
@@ -2006,6 +2230,7 @@ UUIDEOF
   esac
 
   echo "$V2_USER $V2_UUID $V2_EXPIRY $PROTO" >> "$XRAY_DB"
+  set_account_package "$PROTO" "$V2_UUID" "$SELECTED_PACKAGE"
 
   python3 - << PYEOF
 import json
@@ -2042,7 +2267,7 @@ if not found:
             "listen": "127.0.0.1",
             "protocol": proto,
             "settings": {"clients": [{"password": uuid_val, "email": user}]},
-            "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws}}
+            "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws, "heartbeatPeriod": 20}}
         }
     else:
         new_inb = {
@@ -2050,7 +2275,7 @@ if not found:
             "listen": "127.0.0.1",
             "protocol": proto,
             "settings": {"clients": [{"id": uuid_val, "alterId": 0, "email": user}]},
-            "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws}}
+            "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws, "heartbeatPeriod": 20}}
         }
     cfg.setdefault("inbounds", []).append(new_inb)
 
@@ -2091,6 +2316,7 @@ PYEOF
     echo -e " Username    : ${G}$V2_USER${N}"
     echo -e " UUID        : ${G}$V2_UUID${N}"
   fi
+  echo -e " Package     : ${G}$SELECTED_PACKAGE${N}"
   echo -e " Network     : ${G}WebSocket (ws)${N}"
   echo -e " Path        : ${G}$V2_PATH${N}"
   echo -e " Expire Date : ${G}$V2_EXPIRY${N}"
@@ -2171,7 +2397,8 @@ v2ray_delete_by_proto() {
         else
           DISPLAY_NAME="$vuser"
         fi
-        echo -e " ${W}[$IDX]${N} $DISPLAY_NAME  ($TIME_LEFT)"
+        VP_NAME=$(get_account_package "$FILTER_PROTO" "$vuuid")
+        echo -e " ${W}[$IDX]${N} $DISPLAY_NAME  | Pkg: ${G}${VP_NAME:-NONE}${N} ($TIME_LEFT)"
         VACCS+=("$vuser:$vuuid:$vexpiry:$vproto")
         IDX=$((IDX + 1))
       fi
@@ -2209,6 +2436,7 @@ v2ray_delete_by_proto() {
         fi
         EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null || echo 0)
         if [ "$vproto" == "$FILTER_PROTO" ] && [ "$EXP_S" -le "$NOW_S" ]; then
+          remove_account_package "$FILTER_PROTO" "$vuuid"
           COUNT=$((COUNT + 1))
         else
           echo "$line" >> "$TMP"
@@ -2222,6 +2450,7 @@ v2ray_delete_by_proto() {
       TMP=$(mktemp)
       grep -v " ${FILTER_PROTO}$" "$XRAY_DB" > "$TMP" 2>/dev/null || true
       mv "$TMP" "$XRAY_DB"
+      sed -i "/^${FILTER_PROTO}|/d" "$ACCOUNT_PKG_DB" 2>/dev/null || true
       python3 - << PYEOF
 import json
 path = "$XRAY_CONF"
@@ -2246,6 +2475,7 @@ PYEOF
       DEL_PROTO=$(echo "$TARGET" | cut -d: -f4)
 
       sed -i "/^${DEL_USER} /d" "$XRAY_DB"
+      remove_account_package "$DEL_PROTO" "$DEL_UUID"
 
       python3 - << PYEOF
 import json
@@ -2327,6 +2557,15 @@ v2ray_check_by_proto() {
 
     if [ "$vproto" == "$FILTER_PROTO" ]; then
       FOUND=1
+      if ! verify_account_package "$FILTER_PROTO" "$vuuid"; then
+        echo -e " Account     : ${R}${vuser}${N}"
+        echo -e " Error       : ${R}${SERVER_ERROR_MSG}${N}"
+        echo -e " ${C}════════════════════════════════════════════════${N}"
+        echo ""
+        continue
+      fi
+
+      VP_NAME=$(get_account_package "$FILTER_PROTO" "$vuuid")
       EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null || echo 0)
       SECS_LEFT=$(( EXP_S - TODAY_S ))
       if [ "$SECS_LEFT" -le 0 ]; then
@@ -2342,21 +2581,22 @@ v2ray_check_by_proto() {
       if [ "$FILTER_PROTO" == "trojan" ]; then
         LINK_TLS="trojan://${vuuid}@${HOST}:443?type=ws&security=tls&host=${HOST}&path=/trojan&sni=${HOST}#${vuuid}"
         LINK_NTLS="trojan://${vuuid}@${HOST}:80?type=ws&host=${HOST}&path=/trojan#${vuuid}"
-        echo -e " Password   : ${G}$vuuid${N}"
+        echo -e " Password    : ${G}$vuuid${N}"
       elif [ "$FILTER_PROTO" == "vless" ]; then
         LINK_TLS="vless://${vuuid}@${HOST}:443?encryption=none&type=ws&security=tls&host=${HOST}&path=${V2_PATH:-/vless}&sni=${HOST}#${vuser}"
         LINK_NTLS="vless://${vuuid}@${HOST}:80?encryption=none&type=ws&host=${HOST}&path=/vless#${vuser}"
-        echo -e " Username   : ${G}$vuser${N}"
+        echo -e " Username    : ${G}$vuser${N}"
       else
         VMESS_TLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${HOST}\",\"port\":\"443\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${HOST}\"}"
         VMESS_NTLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${HOST}\",\"port\":\"80\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"/vmess\",\"tls\":\"\"}"
         LINK_TLS="vmess://$(echo -n "$VMESS_TLS" | base64 -w 0)"
-        LINK_NTLS="vmess://$(echo -n "$VMESS_JSON2" | base64 -w 0)"
-        echo -e " Username   : ${G}$vuser${N}"
+        LINK_NTLS="vmess://$(echo -n "$VMESS_NTLS" | base64 -w 0)"
+        echo -e " Username    : ${G}$vuser${N}"
       fi
 
-      echo -e " Expiration : ${G}$TIME_LEFT${N}"
-      echo -e " TLS (443)  :"
+      echo -e " Package     : ${G}$VP_NAME${N}"
+      echo -e " Expiration  : ${G}$TIME_LEFT${N}"
+      echo -e " TLS (443)   :"
       echo -e " ${G}${LINK_TLS}${N}"
       print_qr_link "TLS (443)" "$LINK_TLS"
       echo ""
