@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =============================================
-#   VANTRICKS VPS MANAGER 
-#   OS: Debian/Ubuntu | DNS Ready
+#   VANTRICKS VPS MANAGER
+#   OS: Debian/Ubuntu | DNS + CDN + 301 + Keep-Alive + No-LB + BBR
 # =============================================
 
 # Colors
@@ -27,6 +27,8 @@ OVPN_CLIENT_DIR="/etc/openvpn/client"
 XRAY_CONF="/usr/local/etc/xray/config.json"
 XRAY_DB="/etc/xray/accounts.db"
 NGINX_V2RAY_CONF="/etc/nginx/conf.d/v2ray.conf"
+SSH_BANNER_FILE="/etc/ssh/banner.txt"
+DEFAULT_BANNER_TEXT="AVD TEAM"
 SERVER_ERROR_MSG="Server error contact owner vantricks team."
 AUTO_REBOOT_ON_SAVE="ON"
 
@@ -69,7 +71,7 @@ check_password() {
 # ─────────────────────────────────────────────────
 
 # ══════════════════════════════════════════════
-#   HELPERS, PACKAGE GATE & HOST / CDN / NS SYNC
+#   HELPERS, PACKAGE GATE, BANNER & HOST SYNC
 # ══════════════════════════════════════════════
 
 press_enter() {
@@ -79,7 +81,7 @@ press_enter() {
 
 check_root() {
   if [ "$EUID" -ne 0 ]; then
-    echo -e "${R}[ERROR] Please run as root: sudo bash van.sh${N}"
+    echo -e "${R}[ERROR] Please run as root: sudo bash Final.sh${N}"
     exit 1
   fi
 }
@@ -118,6 +120,7 @@ ensure_default_toggles() {
     "BOOSTER_ENABLED=${BOOSTER_ENABLED:-ON}"
     "REDIRECT_301=${REDIRECT_301:-ON}"
     "AUTO_REBOOT_ON_SAVE=${AUTO_REBOOT_ON_SAVE:-ON}"
+    "BANNER_TEXT=${BANNER_TEXT:-$DEFAULT_BANNER_TEXT}"
   )
 
   for entry in "${VARS[@]}"; do
@@ -137,6 +140,77 @@ set_config_kv() {
   sed -i "/^${KEY}=/d" "$CONFIG_FILE" 2>/dev/null || true
   echo "${KEY}=${VAL}" >> "$CONFIG_FILE"
   export "$KEY=$VAL"
+}
+
+get_banner_text() {
+  [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+  if [ -n "$BANNER_TEXT" ]; then
+    echo "$BANNER_TEXT"
+  elif [ -s "$SSH_BANNER_FILE" ]; then
+    head -n 1 "$SSH_BANNER_FILE"
+  else
+    echo "$DEFAULT_BANNER_TEXT"
+  fi
+}
+
+apply_banner_config() {
+  local BTEXT
+  BTEXT=$(get_banner_text)
+  mkdir -p /etc/ssh
+  printf "%s\n" "$BTEXT" > "$SSH_BANNER_FILE"
+  if [ -f /etc/ssh/sshd_config ]; then
+    sed -i '/^Banner/d' /etc/ssh/sshd_config
+    echo "Banner $SSH_BANNER_FILE" >> /etc/ssh/sshd_config
+    systemctl restart ssh > /dev/null 2>&1 || systemctl restart sshd > /dev/null 2>&1 || true
+  fi
+}
+
+custom_banner_menu() {
+  while true; do
+    local CUR_BANNER
+    CUR_BANNER=$(get_banner_text)
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}         ${W}CUSTOM BANNER (DEFAULT: AVD TEAM)${N}      ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  Active Banner : ${G}${CUR_BANNER}${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} Set Custom Banner Text                   ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[2]${N} Reset Banner to Default (AVD TEAM)       ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                        ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Option >>> " BOPT
+
+    case "$BOPT" in
+      1)
+        echo ""
+        read -p "  Enter custom banner text: " NEW_BANNER
+        NEW_BANNER=$(echo "$NEW_BANNER" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [ -z "$NEW_BANNER" ]; then
+          echo -e " ${R}[!] Banner text cannot be empty!${N}"
+          sleep 1
+        else
+          set_config_kv "BANNER_TEXT" "$NEW_BANNER"
+          apply_banner_config
+          echo -e " ${G}[✓] Custom banner updated to '${NEW_BANNER}' and applied!${N}"
+          sleep 1
+        fi
+        ;;
+      2)
+        set_config_kv "BANNER_TEXT" "$DEFAULT_BANNER_TEXT"
+        apply_banner_config
+        echo -e "\n ${G}[✓] Banner reset to default: ${DEFAULT_BANNER_TEXT}${N}"
+        sleep 1
+        ;;
+      0)
+        break
+        ;;
+      *)
+        echo -e "\n ${R}[!] Invalid option!${N}"
+        sleep 1
+        ;;
+    esac
+  done
 }
 
 get_auto_reboot_state() {
@@ -589,6 +663,7 @@ enable_all_protocols_default() {
   done
   sync_host_config
   apply_enhancement_booster
+  apply_banner_config
   echo -e "\n ${G}[✓] All Protocols (SSH, OVPN, SSL, MUX, WS, Nginx, Xray, XHTTP, DNSTT, SSH+DNSTT, Slipstream), Domain, CDN & NS set to ON!${N}"
   sleep 1
 }
@@ -887,6 +962,11 @@ sync_host_config() {
   [ -z "$NAMESERVER" ] && NAMESERVER="$HOST"
   [ -z "$CDN_DOMAIN" ] && CDN_DOMAIN="$HOST"
 
+  # Record installation defaults if not already captured
+  [ -z "$INIT_HOST" ] && set_config_kv "INIT_HOST" "$HOST"
+  [ -z "$INIT_CDN_DOMAIN" ] && set_config_kv "INIT_CDN_DOMAIN" "$CDN_DOMAIN"
+  [ -z "$INIT_NAMESERVER" ] && set_config_kv "INIT_NAMESERVER" "$NAMESERVER"
+
   local EXTRA_HOSTS=""
   if [ -s "$SNI_PROXY_HOST_FILE" ]; then
     EXTRA_HOSTS=$(tr '\n' ' ' < "$SNI_PROXY_HOST_FILE")
@@ -1036,49 +1116,162 @@ NGINXEOF
   fi
 }
 
-update_host_domain() {
-  [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
-  clear
-  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-  echo -e "${C}║${N}     ${W}UPDATE DOMAIN, CDN & NS (SYNC ALL)${N}       ${C}║${N}"
-  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${C}║${N}  Current Domain : ${G}${HOST:-N/A}${N}"
-  echo -e "${C}║${N}  Current CDN    : ${G}${CDN_DOMAIN:-$HOST}${N}"
-  echo -e "${C}║${N}  Current NS     : ${G}${NAMESERVER:-N/A}${N}"
-  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  read -p "  New Host Domain (Enter to keep) : " NEW_HOST
-  read -p "  New CDN Domain  (Enter to keep) : " NEW_CDN
-  read -p "  New NS Domain   (Enter to keep) : " NEW_NS
+purge_old_domain_references() {
+  local OLD_H="$1"
+  local OLD_C="$2"
+  local OLD_N="$3"
+  local NEW_H="$4"
+  local NEW_C="$5"
+  local NEW_N="$6"
 
-  NEW_HOST="${NEW_HOST:-$HOST}"
-  if [ -z "$NEW_HOST" ]; then
-    echo -e " ${R}[!] Host domain cannot be empty!${N}"
-    sleep 2; return
+  : > "$SNI_PROXY_HOST_FILE"
+  echo "$NEW_C" >> "$SNI_PROXY_HOST_FILE"
+  if [ "$NEW_H" != "$NEW_C" ]; then
+    echo "$NEW_H" >> "$SNI_PROXY_HOST_FILE"
   fi
-
-  NEW_CDN="${NEW_CDN:-$CDN_DOMAIN}"
-  [ -z "$NEW_CDN" ] && NEW_CDN="$NEW_HOST"
-
-  NEW_NS="${NEW_NS:-$NAMESERVER}"
-  [ -z "$NEW_NS" ] && NEW_NS="$NEW_HOST"
-
-  set_config_kv "HOST" "$NEW_HOST"
-  set_config_kv "CDN_DOMAIN" "$NEW_CDN"
-  set_config_kv "NAMESERVER" "$NEW_NS"
+  sed -i '/^[[:space:]]*$/d' "$SNI_PROXY_HOST_FILE" 2>/dev/null || true
 
   if [ -d "$OVPN_CLIENT_DIR" ]; then
     for ovpn in "${OVPN_CLIENT_DIR}"/*-tcp443.ovpn; do
       [ -f "$ovpn" ] || continue
+      local u_name
       u_name=$(basename "$ovpn" "-tcp443.ovpn")
       generate_ovpn_profile "$u_name"
     done
   fi
+}
 
-  sync_host_config
-  apply_enhancement_booster
-  systemctl restart ws-proxy-8080 xray dnstt ssh-dnstt slipstream-rust nginx > /dev/null 2>&1 || true
-  echo -e "\n ${G}[✓] Domain ('$NEW_HOST'), CDN ('$NEW_CDN') & NS ('$NEW_NS') updated and synced!${N}"
-  press_enter
+update_host_domain() {
+  [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+  SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  local DEF_H="${INIT_HOST:-${HOST:-$SERVER_IP}}"
+  local DEF_C="${INIT_CDN_DOMAIN:-${CDN_DOMAIN:-$DEF_H}}"
+  local DEF_N="${INIT_NAMESERVER:-${NAMESERVER:-$DEF_H}}"
+
+  while true; do
+    get_booster_verdict_and_score
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}     ${W}DOMAIN & NS MANAGER (SAVE -> REBOOT)${N}       ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  Current Domain : ${G}${HOST:-N/A}${N}"
+    echo -e "${C}║${N}  Current CDN    : ${G}${CDN_DOMAIN:-$HOST}${N}"
+    echo -e "${C}║${N}  Current NS     : ${G}${NAMESERVER:-N/A}${N}"
+    echo -e "${C}║${N}  Default Domain : ${W}${DEF_H}${N}"
+    echo -e "${C}║${N}  Default NS     : ${W}${DEF_N}${N}"
+    echo -e "${C}║${N}  Booster Score  : ${G}${BOOSTER_SCORE}/100 [${BOOSTER_TIER}]${N}"
+    echo -e "${C}║${N}  Booster Verdict: ${G}${BOOSTER_VERDICT}${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} Type New Domain, CDN & NS (Save+Reboot)  ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[2]${N} Reset Default Domain & NS (Reboot)       ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                        ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Option >>> " DOPT
+
+    case "$DOPT" in
+      1)
+        echo ""
+        read -p "  Type New Domain (e.g. vps.example.com) : " NEW_HOST
+        read -p "  Type New CDN    (Enter = same/new)   : " NEW_CDN
+        read -p "  Type New NS     (e.g. ns.example.com)  : " NEW_NS
+
+        NEW_HOST=$(echo "$NEW_HOST" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        NEW_CDN=$(echo "$NEW_CDN" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        NEW_NS=$(echo "$NEW_NS" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        if [ -z "$NEW_HOST" ]; then
+          echo -e " ${R}[!] New Domain cannot be empty!${N}"
+          sleep 2
+          continue
+        fi
+        [ -z "$NEW_CDN" ] && NEW_CDN="$NEW_HOST"
+        [ -z "$NEW_NS" ] && NEW_NS="$NEW_HOST"
+
+        echo ""
+        echo -e " New Domain : ${G}${NEW_HOST}${N}"
+        echo -e " New CDN    : ${G}${NEW_CDN}${N}"
+        echo -e " New NS     : ${G}${NEW_NS}${N}"
+        echo -e " ${W}[s]${N} Save & Auto Reboot Server (Old Domain/NS Disabled)    ${W}[c]${N} Cancel"
+        read -p " Action >>> " SAVE_D
+
+        case "$SAVE_D" in
+          s|S)
+            local OLD_H="$HOST"
+            local OLD_C="$CDN_DOMAIN"
+            local OLD_N="$NAMESERVER"
+
+            set_config_kv "HOST" "$NEW_HOST"
+            set_config_kv "CDN_DOMAIN" "$NEW_CDN"
+            set_config_kv "NAMESERVER" "$NEW_NS"
+            set_config_kv "PROTO_SSH" "ON"
+            set_config_kv "PROTO_OVPN" "ON"
+            set_config_kv "PROTO_SSL" "ON"
+            set_config_kv "PROTO_MUX" "ON"
+            set_config_kv "PROTO_WS" "ON"
+            set_config_kv "PROTO_NGINX" "ON"
+            set_config_kv "PROTO_XRAY" "ON"
+            set_config_kv "PROTO_XHTTP" "ON"
+            set_config_kv "PROTO_DNSTT" "ON"
+            set_config_kv "PROTO_SSH_DNSTT" "ON"
+            set_config_kv "PROTO_SLIPSTREAM" "ON"
+            set_config_kv "BOOSTER_ENABLED" "ON"
+            set_config_kv "REDIRECT_301" "ON"
+
+            purge_old_domain_references "$OLD_H" "$OLD_C" "$OLD_N" "$NEW_HOST" "$NEW_CDN" "$NEW_NS"
+            sync_host_config
+            apply_enhancement_booster
+            apply_banner_config
+            systemctl restart ws-proxy-8080 xray dnstt ssh-dnstt slipstream-rust nginx stunnel4 openvpn@server openvpn@server-tcp > /dev/null 2>&1 || true
+            systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1 || true
+
+            trigger_auto_reboot "Domain ('$NEW_HOST'), CDN ('$NEW_CDN') & NS ('$NEW_NS') saved; old values disabled. Rebooting..."
+            ;;
+          *)
+            echo -e "\n ${Y}[!] Cancelled.${N}"
+            sleep 1
+            ;;
+        esac
+        ;;
+      2)
+        local OLD_H="$HOST"
+        local OLD_C="$CDN_DOMAIN"
+        local OLD_N="$NAMESERVER"
+
+        set_config_kv "HOST" "$DEF_H"
+        set_config_kv "CDN_DOMAIN" "$DEF_C"
+        set_config_kv "NAMESERVER" "$DEF_N"
+        set_config_kv "PROTO_SSH" "ON"
+        set_config_kv "PROTO_OVPN" "ON"
+        set_config_kv "PROTO_SSL" "ON"
+        set_config_kv "PROTO_MUX" "ON"
+        set_config_kv "PROTO_WS" "ON"
+        set_config_kv "PROTO_NGINX" "ON"
+        set_config_kv "PROTO_XRAY" "ON"
+        set_config_kv "PROTO_XHTTP" "ON"
+        set_config_kv "PROTO_DNSTT" "ON"
+        set_config_kv "PROTO_SSH_DNSTT" "ON"
+        set_config_kv "PROTO_SLIPSTREAM" "ON"
+        set_config_kv "BOOSTER_ENABLED" "ON"
+        set_config_kv "REDIRECT_301" "ON"
+
+        purge_old_domain_references "$OLD_H" "$OLD_C" "$OLD_N" "$DEF_H" "$DEF_C" "$DEF_N"
+        sync_host_config
+        apply_enhancement_booster
+        apply_banner_config
+        systemctl restart ws-proxy-8080 xray dnstt ssh-dnstt slipstream-rust nginx stunnel4 openvpn@server openvpn@server-tcp > /dev/null 2>&1 || true
+        systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1 || true
+
+        trigger_auto_reboot "Reset to default Domain ('$DEF_H') & NS ('$DEF_N') with all protocols & booster ON. Rebooting..."
+        ;;
+      0)
+        break
+        ;;
+      *)
+        echo -e "\n ${R}[!] Invalid option!${N}"
+        sleep 1
+        ;;
+    esac
+  done
 }
 
 load_config() {
@@ -1089,6 +1282,7 @@ load_config() {
     source "$CONFIG_FILE"
     [ "${BOOSTER_ENABLED:-ON}" == "ON" ] && apply_enhancement_booster
     sync_host_config
+    apply_banner_config
   else
     first_run_setup
   fi
@@ -1134,6 +1328,7 @@ get_info() {
   PKG_COUNT=$(count_packages)
   SNI_COUNT=$(grep -c '[^[:space:]]' "$SNI_PROXY_HOST_FILE" 2>/dev/null || echo 0)
   REBOOT_TOGGLE_STATE=$(get_auto_reboot_state)
+  ACTIVE_BANNER=$(get_banner_text)
   TOTAL_ACCOUNTS=$(( ${SSH_ACCOUNTS} + ${V2RAY_ACCOUNTS} ))
   CPU_CORES=$(nproc 2>/dev/null || echo 1)
   CPU_LOAD=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "0")
@@ -1418,8 +1613,12 @@ first_run_setup() {
 HOST=$INPUT_HOST
 CDN_DOMAIN=$INPUT_CDN
 NAMESERVER=$INPUT_NS
+INIT_HOST=$INPUT_HOST
+INIT_CDN_DOMAIN=$INPUT_CDN
+INIT_NAMESERVER=$INPUT_NS
 PUBKEY=$INPUT_PUBKEY
 PUBKEY_TYPE=$PUBKEY_TYPE
+BANNER_TEXT=$DEFAULT_BANNER_TEXT
 AUTO_REBOOT_ON_SAVE=ON
 PROTO_SSH=ON
 PROTO_OVPN=ON
@@ -1677,9 +1876,9 @@ install_all() {
     sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
     sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 
-    printf "vantricks Script v0.9.0 - Unified SSH/OVPN + Xray WS/XHTTP + DNSTT/SSH+DNSTT + Slipstream + 301 + Booster\n" > /etc/ssh/banner.txt
+    printf "%s\n" "${BANNER_TEXT:-$DEFAULT_BANNER_TEXT}" > "$SSH_BANNER_FILE"
     sed -i '/^Banner/d' /etc/ssh/sshd_config
-    echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
+    echo "Banner $SSH_BANNER_FILE" >> /etc/ssh/sshd_config
     systemctl enable ssh > /dev/null 2>&1
     systemctl restart ssh > /dev/null 2>&1
 
@@ -1693,6 +1892,7 @@ install_all() {
     install_v2ray_auto
     sync_host_config
     install_custom_openssh
+    apply_banner_config
     apply_enhancement_booster
 
     cp "$(realpath "$0")" /root/vantricks-script.sh
@@ -1762,6 +1962,7 @@ if [ -f "$CONFIG_FILE" ]; then
   echo -e " Domain     : ${G}$HOST${N}"
   echo -e " CDN Domain : ${G}${CDN_DOMAIN:-$HOST}${N}"
   echo -e " NS         : ${G}$NAMESERVER${N}"
+  echo -e " Banner     : ${G}${BANNER_TEXT:-AVD TEAM}${N}"
   echo -e " Booster    : ${G}${B_VERDICT} (${B_SCORE}/100 [${B_TIER}])${N}"
   echo -e " Public Key : ${G}${DNSTT_PUBKEY}${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
@@ -1845,13 +2046,15 @@ show_summary() {
   [ -z "$HOST" ] && HOST="$SERVER_IP"
   [ -z "$CDN_DOMAIN" ] && CDN_DOMAIN="$HOST"
   get_booster_verdict_and_score
+  local SUM_BANNER
+  SUM_BANNER=$(get_banner_text)
 
-  svc_status() {
+  svc() {
     STATUS=$(systemctl is-active "$1" 2>/dev/null)
     if [ "$STATUS" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
   }
 
-  svc_status_sslh() {
+  svc_sslh() {
     S1=$(systemctl is-active sslh 2>/dev/null)
     S2=$(systemctl is-active sslh-select 2>/dev/null)
     if [ "$S1" == "active" ] || [ "$S2" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
@@ -1887,6 +2090,7 @@ show_summary() {
   echo -e " Domain     : ${G}$HOST${N}"
   echo -e " CDN Domain : ${G}$CDN_DOMAIN${N}"
   echo -e " NS         : ${G}$NAMESERVER${N}"
+  echo -e " Banner     : ${G}${SUM_BANNER}${N}"
   echo -e " Booster    : ${G}${BOOSTER_VERDICT} (${BOOSTER_SCORE}/100 [${BOOSTER_TIER}])${N}"
   echo -e " Public Key : ${G}${DNSTT_PUBKEY}${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
@@ -2708,6 +2912,7 @@ main_menu() {
     echo -e "${C}║${N} ${Y}●${N} IP VPS   : ${W}$SERVER_IP${N}"
     echo -e "${C}║${N} ${Y}●${N} Domain   : ${W}$HOST${N}"
     echo -e "${C}║${N} ${Y}●${N} CDN / NS : ${W}$CDN_DOMAIN${N} | ${W}$NAMESERVER${N}"
+    echo -e "${C}║${N} ${Y}●${N} Banner   : ${G}$ACTIVE_BANNER${N}"
     echo -e "${C}║${N} ${Y}●${N} Routing  : ${G}Keep-Alive | 301 | No-LB | XHTTP${N}"
     echo -e "${C}║${N} ${Y}●${N} Packages : $PKG_STATUS_DISP"
     echo -e "${C}║${N} ${Y}●${N} Strength : ${BOOST_COL}${BOOSTER_SCORE}/100 [${BOOSTER_TIER}]${N}"
@@ -2728,12 +2933,12 @@ main_menu() {
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}            ${W}❱❱ MAIN MENU ❰❰${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[1]${N} SSH + OVPN Menu    ${W}[6]${N} Package Manager"
-    echo -e "${C}║${N}  ${W}[2]${N} V2Ray/Xray Menu    ${W}[7]${N} Update Domain/CDN/NS"
-    echo -e "${C}║${N}  ${W}[3]${N} Services Status    ${W}[8]${N} SNI | Proxy | CDN"
-    echo -e "${C}║${N}  ${W}[4]${N} Restart Services   ${W}[9]${N} Protocol Toggles (ON)"
-    echo -e "${C}║${N}  ${W}[5]${N} Server Info        ${W}[10]${N} Live Booster Monitor"
-    echo -e "${C}║${N}  ${W}[0]${N} Exit"
+    echo -e "${C}║${N}  ${W}[1]${N} SSH + OVPN Menu    ${W}[7]${N} Domain & NS Menu"
+    echo -e "${C}║${N}  ${W}[2]${N} V2Ray/Xray Menu    ${W}[8]${N} SNI | Proxy | CDN"
+    echo -e "${C}║${N}  ${W}[3]${N} Services Status    ${W}[9]${N} Protocol Toggles (ON)"
+    echo -e "${C}║${N}  ${W}[4]${N} Restart Services   ${W}[10]${N} Live Booster Monitor"
+    echo -e "${C}║${N}  ${W}[5]${N} Server Info        ${W}[11]${N} Custom Banner"
+    echo -e "${C}║${N}  ${W}[6]${N} Package Manager    ${W}[0]${N} Exit"
     echo -e "${C}╚══════════════════════════════════════════════╝${N}"
     read -p " Option >>> " OPT
     case $OPT in
@@ -2747,6 +2952,7 @@ main_menu() {
       8) sni_proxy_host_menu ;;
       9) protocol_toggles_menu ;;
       10) python3 "$BOOSTER_SCRIPT" live ;;
+      11) custom_banner_menu ;;
       0) clear; exit 0 ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
     esac
@@ -3093,6 +3299,7 @@ check_services() {
 restart_services() {
   sync_host_config
   apply_enhancement_booster
+  apply_banner_config
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
   echo -e "${C}║${N}          ${W}RESTARTING SERVICES${N}               ${C}║${N}"
@@ -3105,7 +3312,7 @@ restart_services() {
   fuser -k 443/tcp > /dev/null 2>&1
 
   systemctl restart ssh > /dev/null 2>&1
-  echo -e " ${G}[✓]${N} SSH restarted"
+  echo -e " ${G}[✓]${N} SSH restarted (Banner: $(get_banner_text))"
   systemctl restart openvpn@server openvpn@server-tcp > /dev/null 2>&1
   echo -e " ${G}[✓]${N} OpenVPN (UDP 1194 & TCP 443) restarted"
   systemctl stop stunnel4 > /dev/null 2>&1
@@ -3130,7 +3337,7 @@ restart_services() {
 }
 
 # ══════════════════════════════════════════════
-#   V2RAY / XRAY MENU (VMess + VLESS + Trojan WS + XHTTP + UUID RESET)
+#   V2RAY / XRAY MENU (VMess + VLESS + Trojan WS + XHTTP + BATCH UUID RESET)
 # ══════════════════════════════════════════════
 
 v2ray_menu() {
@@ -3150,7 +3357,7 @@ v2ray_menu() {
     echo -e "${C}║${N}  ${W}[1]${N} Create Account (WS + XHTTP + TLS/80)   ${C}║${N}"
     echo -e "${C}║${N}  ${W}[2]${N} Delete Account                       ${C}║${N}"
     echo -e "${C}║${N}  ${W}[3]${N} Check Account, Links & QR            ${C}║${N}"
-    echo -e "${C}║${N}  ${W}[4]${N} Reset UUID (Save -> Auto Reboot)     ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[4]${N} UUID Reset & Batch Reset (Reboot)    ${C}║${N}"
     echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                    ${C}║${N}"
     echo -e "${C}╚══════════════════════════════════════════════╝${N}"
     read -p " Option >>> " V2OPT
@@ -3165,101 +3372,14 @@ v2ray_menu() {
   done
 }
 
-v2ray_reset_uuid_menu() {
-  touch "$XRAY_DB"
-  init_packages_store
+replace_single_uuid_files() {
+  local TARGET_USER="$1"
+  local TARGET_OLD_UUID="$2"
+  local NEW_UUID="$3"
+  local TARGET_PROTO="$4"
+  local ASSIGNED_PKG="$5"
 
-  while true; do
-    clear
-    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-    echo -e "${C}║${N}     ${W}UUID RESET & REPLACE (SAVE -> REBOOT)${N}    ${C}║${N}"
-    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  Old UUIDs are purged & disabled on Save +   ${C}║${N}"
-    echo -e "${C}║${N}  automatic server reboot.                    ${C}║${N}"
-    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-
-    local ACCT_ROWS=()
-    local IDX=1
-
-    while IFS= read -r line; do
-      [ -z "$line" ] && continue
-      local vuser vuuid vexpiry vproto ncols
-      vuser=$(echo "$line" | awk '{print $1}')
-      vuuid=$(echo "$line" | awk '{print $2}')
-      ncols=$(echo "$line" | awk '{print NF}')
-      if [ "$ncols" -ge 5 ]; then
-        vexpiry=$(echo "$line" | awk '{print $3" "$4}')
-        vproto=$(echo "$line" | awk '{print $5}')
-      else
-        vexpiry=$(echo "$line" | awk '{print $3}')
-        vproto=$(echo "$line" | awk '{print $4}')
-      fi
-      local vpkg
-      vpkg=$(get_account_package "$vproto" "$vuuid")
-      echo -e "${C}║${N}  ${W}[$IDX]${N} ${G}${vuser}${N} (${Y}${vproto^^}${N}) | Pkg: ${G}${vpkg:-NONE}${N}"
-      echo -e "${C}║${N}      UUID: ${W}${vuuid}${N}"
-      ACCT_ROWS+=("${vuser}|${vuuid}|${vexpiry}|${vproto}")
-      IDX=$((IDX + 1))
-    done < "$XRAY_DB"
-
-    if [ ${#ACCT_ROWS[@]} -eq 0 ]; then
-      echo -e "${C}║${N}  ${Y}No Xray / V2Ray accounts found.${N}"
-      echo -e "${C}╚══════════════════════════════════════════════╝${N}"
-      press_enter
-      return
-    fi
-
-    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[0]${N} Back to Xray Menu                        ${C}║${N}"
-    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
-    read -p " Select Account # to Reset UUID >>> " SEL_IDX
-
-    if [ "$SEL_IDX" == "0" ]; then
-      break
-    fi
-
-    if ! [[ "$SEL_IDX" =~ ^[0-9]+$ ]] || [ "$SEL_IDX" -lt 1 ] || [ "$SEL_IDX" -gt "${#ACCT_ROWS[@]}" ]; then
-      echo -e "\n ${R}[!] Invalid account selection!${N}"
-      sleep 1
-      continue
-    fi
-
-    local CHOSEN="${ACCT_ROWS[$((SEL_IDX - 1))]}"
-    local TARGET_USER TARGET_OLD_UUID TARGET_EXPIRY TARGET_PROTO
-    TARGET_USER=$(echo "$CHOSEN" | cut -d'|' -f1)
-    TARGET_OLD_UUID=$(echo "$CHOSEN" | cut -d'|' -f2)
-    TARGET_EXPIRY=$(echo "$CHOSEN" | cut -d'|' -f3)
-    TARGET_PROTO=$(echo "$CHOSEN" | cut -d'|' -f4)
-
-    local NEW_UUID
-    NEW_UUID=$(python3 - << 'NEWUUIDEOF'
-import uuid
-print(str(uuid.uuid4()))
-NEWUUIDEOF
-)
-
-    local ASSIGNED_PKG
-    ASSIGNED_PKG=$(get_account_package "$TARGET_PROTO" "$TARGET_OLD_UUID")
-    [ -z "$ASSIGNED_PKG" ] && ASSIGNED_PKG=$(head -n 1 "$PACKAGES_FILE" 2>/dev/null | tr -d '[:space:]')
-
-    clear
-    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-    echo -e "${C}║${N}        ${W}CONFIRM UUID RESET & SAVE${N}             ${C}║${N}"
-    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  User       : ${G}${TARGET_USER}${N} (${Y}${TARGET_PROTO^^}${N})"
-    echo -e "${C}║${N}  Package    : ${G}${ASSIGNED_PKG:-NONE}${N}"
-    echo -e "${C}║${N}  Old UUID   : ${R}${TARGET_OLD_UUID} (WILL BE REMOVED)${N}"
-    echo -e "${C}║${N}  New UUID   : ${G}${NEW_UUID}${N}"
-    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[s]${N} Save & Auto Reboot Server (Apply Now)    ${C}║${N}"
-    echo -e "${C}║${N}  ${W}[c]${N} Cancel                                   ${C}║${N}"
-    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
-    read -p " Action >>> " SAVE_UUID_OPT
-
-    case "$SAVE_UUID_OPT" in
-      s|S)
-        # 1. Replace OLD_UUID with NEW_UUID in Xray config.json and purge OLD_UUID completely
-        python3 - << PYRESET
+  python3 - << PYRESET
 import json
 
 conf_path = "$XRAY_CONF"
@@ -3310,39 +3430,211 @@ with open(conf_path, "w") as f:
     json.dump(cfg, f, indent=2)
 PYRESET
 
-        # 2. Replace OLD_UUID with NEW_UUID in XRAY_DB
-        local TMP_DB
-        TMP_DB=$(mktemp)
-        while IFS= read -r dbline; do
-          [ -z "$dbline" ] && continue
-          local duser duuid dexp dprot dcols
-          duser=$(echo "$dbline" | awk '{print $1}')
-          duuid=$(echo "$dbline" | awk '{print $2}')
-          dcols=$(echo "$dbline" | awk '{print NF}')
-          if [ "$dcols" -ge 5 ]; then
-            dexp=$(echo "$dbline" | awk '{print $3" "$4}')
-            dprot=$(echo "$dbline" | awk '{print $5}')
-          else
-            dexp=$(echo "$dbline" | awk '{print $3}')
-            dprot=$(echo "$dbline" | awk '{print $4}')
-          fi
-          if [ "$duser" == "$TARGET_USER" ] && [ "$duuid" == "$TARGET_OLD_UUID" ] && [ "$dprot" == "$TARGET_PROTO" ]; then
-            echo "${duser} ${NEW_UUID} ${dexp} ${dprot}" >> "$TMP_DB"
-          else
-            echo "$dbline" >> "$TMP_DB"
-          fi
-        done < "$XRAY_DB"
-        mv "$TMP_DB" "$XRAY_DB"
+  local TMP_DB
+  TMP_DB=$(mktemp)
+  while IFS= read -r dbline; do
+    [ -z "$dbline" ] && continue
+    local duser duuid dexp dprot dcols
+    duser=$(echo "$dbline" | awk '{print $1}')
+    duuid=$(echo "$dbline" | awk '{print $2}')
+    dcols=$(echo "$dbline" | awk '{print NF}')
+    if [ "$dcols" -ge 5 ]; then
+      dexp=$(echo "$dbline" | awk '{print $3" "$4}')
+      dprot=$(echo "$dbline" | awk '{print $5}')
+    else
+      dexp=$(echo "$dbline" | awk '{print $3}')
+      dprot=$(echo "$dbline" | awk '{print $4}')
+    fi
+    if [ "$duser" == "$TARGET_USER" ] && [ "$duuid" == "$TARGET_OLD_UUID" ] && [ "$dprot" == "$TARGET_PROTO" ]; then
+      echo "${duser} ${NEW_UUID} ${dexp} ${dprot}" >> "$TMP_DB"
+    else
+      echo "$dbline" >> "$TMP_DB"
+    fi
+  done < "$XRAY_DB"
+  mv "$TMP_DB" "$XRAY_DB"
 
-        # 3. Rotate package binding from OLD_UUID to NEW_UUID
-        remove_account_package "$TARGET_PROTO" "$TARGET_OLD_UUID"
-        if [ -n "$ASSIGNED_PKG" ]; then
-          set_account_package "$TARGET_PROTO" "$NEW_UUID" "$ASSIGNED_PKG"
-        fi
+  remove_account_package "$TARGET_PROTO" "$TARGET_OLD_UUID"
+  if [ -n "$ASSIGNED_PKG" ]; then
+    set_account_package "$TARGET_PROTO" "$NEW_UUID" "$ASSIGNED_PKG"
+  fi
+}
 
-        # 4. Sync host config, re-apply Python enhancement booster & restart Xray before reboot
+v2ray_batch_uuid_reset() {
+  touch "$XRAY_DB"
+  init_packages_store
+
+  local BATCH_ROWS=()
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local buser buuid bexp bprot bcols bpkg bnew
+    buser=$(echo "$line" | awk '{print $1}')
+    buuid=$(echo "$line" | awk '{print $2}')
+    bcols=$(echo "$line" | awk '{print NF}')
+    if [ "$bcols" -ge 5 ]; then
+      bexp=$(echo "$line" | awk '{print $3" "$4}')
+      bprot=$(echo "$line" | awk '{print $5}')
+    else
+      bexp=$(echo "$line" | awk '{print $3}')
+      bprot=$(echo "$line" | awk '{print $4}')
+    fi
+    bpkg=$(get_account_package "$bprot" "$buuid")
+    [ -z "$bpkg" ] && bpkg=$(head -n 1 "$PACKAGES_FILE" 2>/dev/null | tr -d '[:space:]')
+    bnew=$(python3 -c 'import uuid; print(str(uuid.uuid4()))')
+    BATCH_ROWS+=("${buser}|${buuid}|${bnew}|${bexp}|${bprot}|${bpkg}")
+  done < "$XRAY_DB"
+
+  if [ ${#BATCH_ROWS[@]} -eq 0 ]; then
+    echo -e "\n ${Y}[!] No Xray accounts found for batch UUID reset.${N}"
+    sleep 2
+    return
+  fi
+
+  clear
+  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+  echo -e "${C}║${N}     ${W}ONE-CLICK BATCH UUID RESET (ALL ACCOUNTS)${N}  ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  Accounts to rotate : ${G}${#BATCH_ROWS[@]}${N}"
+  echo -e "${C}║${N}  Old UUIDs          : ${R}PURGED & DISABLED ON SAVE${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  for row in "${BATCH_ROWS[@]}"; do
+    local r_u r_o r_n r_p
+    r_u=$(echo "$row" | cut -d'|' -f1)
+    r_o=$(echo "$row" | cut -d'|' -f2)
+    r_n=$(echo "$row" | cut -d'|' -f3)
+    r_p=$(echo "$row" | cut -d'|' -f5)
+    echo -e "${C}║${N}  ${G}${r_u}${N} (${Y}${r_p^^}${N})"
+    echo -e "${C}║${N}    Old: ${R}${r_o}${N}"
+    echo -e "${C}║${N}    New: ${G}${r_n}${N}"
+  done
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  ${W}[s]${N} Save All & Auto Reboot Server              ${C}║${N}"
+  echo -e "${C}║${N}  ${W}[c]${N} Cancel                                   ${C}║${N}"
+  echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+  read -p " Action >>> " B_SAVE
+
+  case "$B_SAVE" in
+    s|S)
+      for row in "${BATCH_ROWS[@]}"; do
+        local r_u r_o r_n r_p r_pkg
+        r_u=$(echo "$row" | cut -d'|' -f1)
+        r_o=$(echo "$row" | cut -d'|' -f2)
+        r_n=$(echo "$row" | cut -d'|' -f3)
+        r_p=$(echo "$row" | cut -d'|' -f5)
+        r_pkg=$(echo "$row" | cut -d'|' -f6)
+        replace_single_uuid_files "$r_u" "$r_o" "$r_n" "$r_p" "$r_pkg"
+      done
+      sync_host_config
+      apply_enhancement_booster
+      apply_banner_config
+      systemctl restart xray > /dev/null 2>&1 || true
+      trigger_auto_reboot "Batch UUID reset completed for ${#BATCH_ROWS[@]} account(s). Old UUIDs removed; rebooting..."
+      ;;
+    *)
+      echo -e "\n ${Y}[!] Batch UUID reset cancelled.${N}"
+      sleep 1
+      ;;
+  esac
+}
+
+v2ray_reset_uuid_menu() {
+  touch "$XRAY_DB"
+  init_packages_store
+
+  while true; do
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}     ${W}UUID RESET & BATCH RESET (SAVE -> REBOOT)${N}  ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[B]${N} One-Click Batch UUID Reset (All Accounts)  ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+
+    local ACCT_ROWS=()
+    local IDX=1
+
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      local vuser vuuid vexpiry vproto ncols
+      vuser=$(echo "$line" | awk '{print $1}')
+      vuuid=$(echo "$line" | awk '{print $2}')
+      ncols=$(echo "$line" | awk '{print NF}')
+      if [ "$ncols" -ge 5 ]; then
+        vexpiry=$(echo "$line" | awk '{print $3" "$4}')
+        vproto=$(echo "$line" | awk '{print $5}')
+      else
+        vexpiry=$(echo "$line" | awk '{print $3}')
+        vproto=$(echo "$line" | awk '{print $4}')
+      fi
+      local vpkg
+      vpkg=$(get_account_package "$vproto" "$vuuid")
+      echo -e "${C}║${N}  ${W}[$IDX]${N} ${G}${vuser}${N} (${Y}${vproto^^}${N}) | Pkg: ${G}${vpkg:-NONE}${N}"
+      echo -e "${C}║${N}      UUID: ${W}${vuuid}${N}"
+      ACCT_ROWS+=("${vuser}|${vuuid}|${vexpiry}|${vproto}")
+      IDX=$((IDX + 1))
+    done < "$XRAY_DB"
+
+    if [ ${#ACCT_ROWS[@]} -eq 0 ]; then
+      echo -e "${C}║${N}  ${Y}No Xray / V2Ray accounts found.${N}"
+      echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+      press_enter
+      return
+    fi
+
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back to Xray Menu                        ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Select [B] Batch or Account # >>> " SEL_IDX
+
+    if [ "$SEL_IDX" == "0" ]; then
+      break
+    elif [ "$SEL_IDX" == "b" ] || [ "$SEL_IDX" == "B" ]; then
+      v2ray_batch_uuid_reset
+      continue
+    fi
+
+    if ! [[ "$SEL_IDX" =~ ^[0-9]+$ ]] || [ "$SEL_IDX" -lt 1 ] || [ "$SEL_IDX" -gt "${#ACCT_ROWS[@]}" ]; then
+      echo -e "\n ${R}[!] Invalid account selection!${N}"
+      sleep 1
+      continue
+    fi
+
+    local CHOSEN="${ACCT_ROWS[$((SEL_IDX - 1))]}"
+    local TARGET_USER TARGET_OLD_UUID TARGET_EXPIRY TARGET_PROTO
+    TARGET_USER=$(echo "$CHOSEN" | cut -d'|' -f1)
+    TARGET_OLD_UUID=$(echo "$CHOSEN" | cut -d'|' -f2)
+    TARGET_EXPIRY=$(echo "$CHOSEN" | cut -d'|' -f3)
+    TARGET_PROTO=$(echo "$CHOSEN" | cut -d'|' -f4)
+
+    local NEW_UUID
+    NEW_UUID=$(python3 - << 'NEWUUIDEOF'
+import uuid
+print(str(uuid.uuid4()))
+NEWUUIDEOF
+)
+
+    local ASSIGNED_PKG
+    ASSIGNED_PKG=$(get_account_package "$TARGET_PROTO" "$TARGET_OLD_UUID")
+    [ -z "$ASSIGNED_PKG" ] && ASSIGNED_PKG=$(head -n 1 "$PACKAGES_FILE" 2>/dev/null | tr -d '[:space:]')
+
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}        ${W}CONFIRM UUID RESET & SAVE${N}             ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  User       : ${G}${TARGET_USER}${N} (${Y}${TARGET_PROTO^^}${N})"
+    echo -e "${C}║${N}  Package    : ${G}${ASSIGNED_PKG:-NONE}${N}"
+    echo -e "${C}║${N}  Old UUID   : ${R}${TARGET_OLD_UUID} (WILL BE REMOVED)${N}"
+    echo -e "${C}║${N}  New UUID   : ${G}${NEW_UUID}${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[s]${N} Save & Auto Reboot Server (Apply Now)    ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[c]${N} Cancel                                   ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Action >>> " SAVE_UUID_OPT
+
+    case "$SAVE_UUID_OPT" in
+      s|S)
+        replace_single_uuid_files "$TARGET_USER" "$TARGET_OLD_UUID" "$NEW_UUID" "$TARGET_PROTO" "$ASSIGNED_PKG"
         sync_host_config
         apply_enhancement_booster
+        apply_banner_config
         systemctl restart xray > /dev/null 2>&1 || true
 
         trigger_auto_reboot "UUID reset for '${TARGET_USER}' (${NEW_UUID}). Old UUID removed; rebooting server..."
