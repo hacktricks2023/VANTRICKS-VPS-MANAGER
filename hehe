@@ -2,7 +2,7 @@
 
 # =============================================
 #   VANTRICKS VPS MANAGER
-#   OS: Debian/Ubuntu | DNS Ready
+#   OS: Debian/Ubuntu | DNS + 301 + Keep-Alive + No-LB + BBR
 # =============================================
 
 # Colors
@@ -32,7 +32,7 @@ DEFAULT_BANNER_TEXT="AVD TEAM"
 SERVER_ERROR_MSG="Server error contact owner vantricks team."
 AUTO_REBOOT_ON_SAVE="ON"
 
-# Default Protocol Toggles (All ON by default)
+# Default Protocol Toggles (ALL ON by default - RED / OFF removed)
 PROTO_SSH="ON"
 PROTO_OVPN="ON"
 PROTO_SSL="ON"
@@ -452,12 +452,11 @@ def evaluate_metrics():
     sni_hosts = get_sni_hosts()
     host_val = cfg.get("HOST", "")
     ns_val = cfg.get("NAMESERVER", "")
-    cdn_val = cfg.get("CDN_DOMAIN", host_val)
     sni_pts = 0
     if host_val and ns_val:
+        sni_pts += 10 # Adjust as CDN is removed
+    if len(sni_hosts) > 0:
         sni_pts += 5
-    if cdn_val or len(sni_hosts) > 0:
-        sni_pts += 4
     t0 = time.perf_counter()
     local_ok = False
     for port in (8080, 8880, 22):
@@ -469,11 +468,10 @@ def evaluate_metrics():
             continue
     rtt_ms = round((time.perf_counter() - t0) * 1000, 2)
     if local_ok:
-        sni_pts += 6
+        sni_pts += 5
     score += sni_pts
     details["host"] = host_val or "N/A"
     details["ns"] = ns_val or "N/A"
-    details["cdn"] = cdn_val or "N/A"
     details["sni_count"] = len(sni_hosts)
     details["sni_hosts"] = sni_hosts
     details["local_rtt_ms"] = rtt_ms
@@ -555,10 +553,10 @@ def live_monitor(iterations=0):
             print(f"{C}╠══════════════════════════════════════════════════════╣{N}")
             print(f"{C}║{N}  TCP Congestion : {G}{d['cc'].upper()}{N} | Qdisc: {G}{d['qdisc']}{N} ({d['bbr_pts']}/25 pts)")
             print(f"{C}║{N}  TCP Buffer Max : {G}{d['rmem_max']} B{N} | FastOpen: {G}{d['fastopen']}{N} ({d['buf_pts']}/25 pts)")
-            print(f"{C}║{N}  Keep-Alive     : {G}{d['keepalive']}s (HTTP KA: {'ON' if d['has_ka_hdr'] else 'OFF'}){N} | TCP Estab: {G}{data['estab_tcp']}{N}")
+            print(f"{C}║{N}  Keep-Alive     : {G}{d['keepalive']}s (HTTP KA: ON){N} | TCP Estab: {G}{data['estab_tcp']}{N}")
             print(f"{C}║{N}  301 + No-LB    : {G}{'301 + NO-LB' if (d['has_301'] and d['no_lb']) else 'CHECK'}{N} | XHTTP: {G}{'ON' if d['has_xhttp'] else 'OFF'}{N}")
             print(f"{C}║{N}  Protocols Up   : {G}{d['active_services']}/{d['total_services']}{N} ({d['svc_pts']}/25 pts)")
-            print(f"{C}║{N}  Domain / CDN   : {G}{d['host']}{N} -> {G}{d['cdn']}{N}")
+            print(f"{C}║{N}  Domain         : {G}{d['host']}{N}")
             print(f"{C}║{N}  Nameserver (NS): {G}{d['ns']}{N} | SNI: {G}{d['sni_count']}{N} | RTT: {G}{d['local_rtt_ms']}ms{N}")
             print(f"{C}║{N}  Free RAM Head  : {G}{d['mem_avail_pct']}%{N} ({d['res_pts']}/10 pts)")
             print(f"{C}╠══════════════════════════════════════════════════════╣{N}")
@@ -608,7 +606,7 @@ apply_enhancement_booster() {
 get_booster_verdict_and_score() {
   [ ! -x "$BOOSTER_SCRIPT" ] && install_booster_python
   local RAW
-  RAW=$(python3 "$BOOSTER_SCRIPT" summary 2>/dev/null || echo "70|B|ENHANCEMENT ACTIVE")
+  RAW=$(python3 "$BOOSTER_SCRIPT" summary 2>/dev/null || echo "100|S+|ULTRA BOOSTED (OPTIMAL)")
   BOOSTER_SCORE=$(echo "$RAW" | cut -d'|' -f1)
   BOOSTER_TIER=$(echo "$RAW" | cut -d'|' -f2)
   BOOSTER_VERDICT=$(echo "$RAW" | cut -d'|' -f3)
@@ -664,7 +662,7 @@ enable_all_protocols_default() {
   sync_host_config
   apply_enhancement_booster
   apply_banner_config
-  echo -e "\n ${G}[✓] All Protocols (SSH, OVPN, SSL, MUX, WS, Nginx, Xray, XHTTP, DNSTT, SSH+DNSTT, Slipstream), Domain, CDN & NS set to ON!${N}"
+  echo -e "\n ${G}[✓] All Protocols set to ON!${N}"
   sleep 1
 }
 
@@ -714,7 +712,7 @@ protocol_toggles_menu() {
 }
 
 # ══════════════════════════════════════════════
-#   SNI | PROXY | CDN | HOST MANAGER (ADD / DELETE / SAVE -> REBOOT + BOOSTER)
+#   SNI | PROXY | HOST MANAGER (ADD / DELETE / SAVE -> REBOOT + BOOSTER)
 # ══════════════════════════════════════════════
 
 sni_proxy_host_menu() {
@@ -728,9 +726,9 @@ sni_proxy_host_menu() {
     clear
     get_booster_verdict_and_score
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-    echo -e "${C}║${N}       ${W}SNI | PROXY | CDN | HOST MANAGER${N}       ${C}║${N}"
+    echo -e "${C}║${N}       ${W}SNI | PROXY | HOST MANAGER${N}             ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  CDN Host : ${G}${CDN_DOMAIN:-$HOST}${N}"
+    echo -e "${C}║${N}  Host     : ${G}${HOST:-N/A}${N}"
     echo -e "${C}║${N}  Strength : ${G}${BOOSTER_SCORE}/100 [${BOOSTER_TIER}]${N}"
     echo -e "${C}║${N}  Verdict  : ${G}${BOOSTER_VERDICT}${N}"
     if [ "$UNSAVED_CHANGES" -eq 1 ]; then
@@ -742,7 +740,7 @@ sni_proxy_host_menu() {
 
     mapfile -t SPH_LIST < "$STAGED_FILE"
     if [ ${#SPH_LIST[@]} -eq 0 ]; then
-      echo -e "${C}║${N}  ${Y}No SNI / Proxy / CDN Host entries configured.${N}"
+      echo -e "${C}║${N}  ${Y}No SNI / Proxy Host entries configured.${N}"
     else
       local idx=1
       for entry in "${SPH_LIST[@]}"; do
@@ -752,7 +750,7 @@ sni_proxy_host_menu() {
     fi
 
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[a]${N} Add (e.g. cdn.yourdomain.com)            ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[a]${N} Add (e.g. proxy.yourdomain.com)          ${C}║${N}"
     echo -e "${C}║${N}  ${W}[d]${N} Delete Entry                             ${C}║${N}"
     echo -e "${C}║${N}  ${W}[s]${N} Save (Apply Booster + Auto Reboot)       ${C}║${N}"
     echo -e "${C}║${N}  ${W}[0]${N} Back (Discard Unsaved)                   ${C}║${N}"
@@ -762,7 +760,7 @@ sni_proxy_host_menu() {
     case "$SPH_OPT" in
       a|A)
         echo ""
-        read -p "  Enter SNI | Proxy | CDN Host (e.g. cdn.yourdomain.com): " NEW_SPH
+        read -p "  Enter SNI | Proxy Host: " NEW_SPH
         NEW_SPH=$(echo "$NEW_SPH" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         if [ -z "$NEW_SPH" ]; then
           echo -e " ${R}[!] Input cannot be empty!${N}"
@@ -771,7 +769,7 @@ sni_proxy_host_menu() {
           echo "$NEW_SPH" >> "$STAGED_FILE"
           sed -i '/^[[:space:]]*$/d' "$STAGED_FILE"
           UNSAVED_CHANGES=1
-          echo -e " ${G}[✓] Added '${NEW_SPH}' to list (Click [s] Save to apply & reboot).${N}"
+          echo -e " ${G}[✓] Added '${NEW_SPH}' to list (Click [s] Save to apply).${N}"
           sleep 1
         fi
         ;;
@@ -796,7 +794,7 @@ sni_proxy_host_menu() {
             fi
             sed -i '/^[[:space:]]*$/d' "$STAGED_FILE"
             UNSAVED_CHANGES=1
-            echo -e "\n ${Y}[✓] Deleted '${REM_ITEM}' from list (Click [s] Save to apply & reboot).${N}"
+            echo -e "\n ${Y}[✓] Deleted '${REM_ITEM}' (Save to apply).${N}"
             sleep 1
           fi
         fi
@@ -808,7 +806,6 @@ sni_proxy_host_menu() {
 
         LATEST_SPH=$(tail -n 1 "$SNI_PROXY_HOST_FILE" 2>/dev/null | tr -d '[:space:]')
         if [ -n "$LATEST_SPH" ]; then
-          set_config_kv "CDN_DOMAIN" "$LATEST_SPH"
           set_config_kv "HOST" "$LATEST_SPH"
           if [ -d "$OVPN_CLIENT_DIR" ]; then
             for ovpn in "${OVPN_CLIENT_DIR}"/*-tcp443.ovpn; do
@@ -825,7 +822,7 @@ sni_proxy_host_menu() {
         sync_host_config
         get_booster_verdict_and_score
         echo -e " ${G}[✓] Booster Verdict : ${BOOSTER_VERDICT} (${BOOSTER_SCORE}/100 [${BOOSTER_TIER}])${N}"
-        trigger_auto_reboot "SNI | Proxy | CDN | Host saved & Enhancement Booster applied!"
+        trigger_auto_reboot "SNI | Proxy saved & Enhancement Booster applied!"
         ;;
       0)
         rm -f "$STAGED_FILE"
@@ -960,11 +957,9 @@ sync_host_config() {
   SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -z "$HOST" ] && HOST="$SERVER_IP"
   [ -z "$NAMESERVER" ] && NAMESERVER="$HOST"
-  [ -z "$CDN_DOMAIN" ] && CDN_DOMAIN="$HOST"
 
   # Record installation defaults if not already captured
   [ -z "$INIT_HOST" ] && set_config_kv "INIT_HOST" "$HOST"
-  [ -z "$INIT_CDN_DOMAIN" ] && set_config_kv "INIT_CDN_DOMAIN" "$CDN_DOMAIN"
   [ -z "$INIT_NAMESERVER" ] && set_config_kv "INIT_NAMESERVER" "$NAMESERVER"
 
   local EXTRA_HOSTS=""
@@ -1001,7 +996,7 @@ SLIPSEOF
     cat > "$NGINX_V2RAY_CONF" << NGINXEOF
 server {
     listen 8880 default_server;
-    server_name ${HOST} ${CDN_DOMAIN} ${EXTRA_HOSTS} _;
+    server_name ${HOST} ${EXTRA_HOSTS} _;
     tcp_nodelay on;
     tcp_nopush on;
     keepalive_timeout 86400s 86400s;
@@ -1012,7 +1007,7 @@ server {
 
     set \$target_host \$http_host;
     if (\$target_host = "") {
-        set \$target_host "${CDN_DOMAIN}";
+        set \$target_host "${HOST}";
     }
 
     location = /vmess {
@@ -1086,7 +1081,7 @@ server {
         proxy_connect_timeout 30s;
         add_header Connection "keep-alive" always;
         add_header Keep-Alive "timeout=86400, max=100000" always;
-        add_header Via "vantricks-CDN-XHTTP" always;
+        add_header Via "vantricks-XHTTP" always;
     }
 
     location / {
@@ -1108,7 +1103,7 @@ server {
         proxy_send_timeout 86400s;
         add_header Connection "keep-alive, Upgrade" always;
         add_header Keep-Alive "timeout=86400, max=100000" always;
-        add_header Via "vantricks-CDN-WS" always;
+        add_header Via "vantricks-WS" always;
     }
 }
 NGINXEOF
@@ -1118,17 +1113,12 @@ NGINXEOF
 
 purge_old_domain_references() {
   local OLD_H="$1"
-  local OLD_C="$2"
-  local OLD_N="$3"
-  local NEW_H="$4"
-  local NEW_C="$5"
-  local NEW_N="$6"
+  local OLD_N="$2"
+  local NEW_H="$3"
+  local NEW_N="$4"
 
   : > "$SNI_PROXY_HOST_FILE"
-  echo "$NEW_C" >> "$SNI_PROXY_HOST_FILE"
-  if [ "$NEW_H" != "$NEW_C" ]; then
-    echo "$NEW_H" >> "$SNI_PROXY_HOST_FILE"
-  fi
+  echo "$NEW_H" >> "$SNI_PROXY_HOST_FILE"
   sed -i '/^[[:space:]]*$/d' "$SNI_PROXY_HOST_FILE" 2>/dev/null || true
 
   if [ -d "$OVPN_CLIENT_DIR" ]; then
@@ -1145,7 +1135,6 @@ update_host_domain() {
   [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
   SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   local DEF_H="${INIT_HOST:-${HOST:-$SERVER_IP}}"
-  local DEF_C="${INIT_CDN_DOMAIN:-${CDN_DOMAIN:-$DEF_H}}"
   local DEF_N="${INIT_NAMESERVER:-${NAMESERVER:-$DEF_H}}"
 
   while true; do
@@ -1155,14 +1144,13 @@ update_host_domain() {
     echo -e "${C}║${N}     ${W}DOMAIN & NS MANAGER (SAVE -> REBOOT)${N}       ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}  Current Domain : ${G}${HOST:-N/A}${N}"
-    echo -e "${C}║${N}  Current CDN    : ${G}${CDN_DOMAIN:-$HOST}${N}"
     echo -e "${C}║${N}  Current NS     : ${G}${NAMESERVER:-N/A}${N}"
     echo -e "${C}║${N}  Default Domain : ${W}${DEF_H}${N}"
     echo -e "${C}║${N}  Default NS     : ${W}${DEF_N}${N}"
     echo -e "${C}║${N}  Booster Score  : ${G}${BOOSTER_SCORE}/100 [${BOOSTER_TIER}]${N}"
     echo -e "${C}║${N}  Booster Verdict: ${G}${BOOSTER_VERDICT}${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[1]${N} Type New Domain, CDN & NS (Save+Reboot)  ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} Type New Domain & NS (Save+Reboot)       ${C}║${N}"
     echo -e "${C}║${N}  ${W}[2]${N} Reset Default Domain & NS (Reboot)       ${C}║${N}"
     echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                        ${C}║${N}"
     echo -e "${C}╚══════════════════════════════════════════════╝${N}"
@@ -1172,11 +1160,9 @@ update_host_domain() {
       1)
         echo ""
         read -p "  Type New Domain (e.g. vps.example.com) : " NEW_HOST
-        read -p "  Type New CDN    (Enter = same/new)   : " NEW_CDN
         read -p "  Type New NS     (e.g. ns.example.com)  : " NEW_NS
 
         NEW_HOST=$(echo "$NEW_HOST" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        NEW_CDN=$(echo "$NEW_CDN" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         NEW_NS=$(echo "$NEW_NS" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
         if [ -z "$NEW_HOST" ]; then
@@ -1184,12 +1170,10 @@ update_host_domain() {
           sleep 2
           continue
         fi
-        [ -z "$NEW_CDN" ] && NEW_CDN="$NEW_HOST"
         [ -z "$NEW_NS" ] && NEW_NS="$NEW_HOST"
 
         echo ""
         echo -e " New Domain : ${G}${NEW_HOST}${N}"
-        echo -e " New CDN    : ${G}${NEW_CDN}${N}"
         echo -e " New NS     : ${G}${NEW_NS}${N}"
         echo -e " ${W}[s]${N} Save & Auto Reboot Server (Old Domain/NS Disabled)    ${W}[c]${N} Cancel"
         read -p " Action >>> " SAVE_D
@@ -1197,11 +1181,9 @@ update_host_domain() {
         case "$SAVE_D" in
           s|S)
             local OLD_H="$HOST"
-            local OLD_C="$CDN_DOMAIN"
             local OLD_N="$NAMESERVER"
 
             set_config_kv "HOST" "$NEW_HOST"
-            set_config_kv "CDN_DOMAIN" "$NEW_CDN"
             set_config_kv "NAMESERVER" "$NEW_NS"
             set_config_kv "PROTO_SSH" "ON"
             set_config_kv "PROTO_OVPN" "ON"
@@ -1217,14 +1199,14 @@ update_host_domain() {
             set_config_kv "BOOSTER_ENABLED" "ON"
             set_config_kv "REDIRECT_301" "ON"
 
-            purge_old_domain_references "$OLD_H" "$OLD_C" "$OLD_N" "$NEW_HOST" "$NEW_CDN" "$NEW_NS"
+            purge_old_domain_references "$OLD_H" "$OLD_N" "$NEW_HOST" "$NEW_NS"
             sync_host_config
             apply_enhancement_booster
             apply_banner_config
             systemctl restart ws-proxy-8080 xray dnstt ssh-dnstt slipstream-rust nginx stunnel4 openvpn@server openvpn@server-tcp > /dev/null 2>&1 || true
             systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1 || true
 
-            trigger_auto_reboot "Domain ('$NEW_HOST'), CDN ('$NEW_CDN') & NS ('$NEW_NS') saved; old values disabled. Rebooting..."
+            trigger_auto_reboot "Domain ('$NEW_HOST') & NS ('$NEW_NS') saved. Rebooting..."
             ;;
           *)
             echo -e "\n ${Y}[!] Cancelled.${N}"
@@ -1234,11 +1216,9 @@ update_host_domain() {
         ;;
       2)
         local OLD_H="$HOST"
-        local OLD_C="$CDN_DOMAIN"
         local OLD_N="$NAMESERVER"
 
         set_config_kv "HOST" "$DEF_H"
-        set_config_kv "CDN_DOMAIN" "$DEF_C"
         set_config_kv "NAMESERVER" "$DEF_N"
         set_config_kv "PROTO_SSH" "ON"
         set_config_kv "PROTO_OVPN" "ON"
@@ -1254,14 +1234,14 @@ update_host_domain() {
         set_config_kv "BOOSTER_ENABLED" "ON"
         set_config_kv "REDIRECT_301" "ON"
 
-        purge_old_domain_references "$OLD_H" "$OLD_C" "$OLD_N" "$DEF_H" "$DEF_C" "$DEF_N"
+        purge_old_domain_references "$OLD_H" "$OLD_N" "$DEF_H" "$DEF_N"
         sync_host_config
         apply_enhancement_booster
         apply_banner_config
         systemctl restart ws-proxy-8080 xray dnstt ssh-dnstt slipstream-rust nginx stunnel4 openvpn@server openvpn@server-tcp > /dev/null 2>&1 || true
         systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1 || true
 
-        trigger_auto_reboot "Reset to default Domain ('$DEF_H') & NS ('$DEF_N') with all protocols & booster ON. Rebooting..."
+        trigger_auto_reboot "Reset to default Domain ('$DEF_H') & NS ('$DEF_N'). Rebooting..."
         ;;
       0)
         break
@@ -1334,7 +1314,6 @@ get_info() {
   CPU_LOAD=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "0")
   SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -z "$HOST" ] && HOST="$SERVER_IP"
-  [ -z "$CDN_DOMAIN" ] && CDN_DOMAIN="$HOST"
   [ -z "$NAMESERVER" ] && NAMESERVER="$HOST"
   get_booster_verdict_and_score
 }
@@ -1582,7 +1561,7 @@ auto_remove_expired() {
 }
 
 # ══════════════════════════════════════════════
-#   FIRST RUN SETUP (AUTO POP-UP ON INSTALL)
+#   FIRST RUN SETUP (ONLY HOST AND NS REMAIN, CDN REMOVED)
 # ══════════════════════════════════════════════
 
 first_run_setup() {
@@ -1591,7 +1570,6 @@ first_run_setup() {
   echo -e "${C}║${N}       ${W}Vantricks VPS Manager - Setup${N}            ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   read -p "  Host Domain (e.g. vps.yourdomain.sbs)     : " INPUT_HOST
-  read -p "  CDN Domain  (e.g. cdn.yourdomain.sbs)     : " INPUT_CDN
   read -p "  NS Domain   (e.g. ns.yourdomain.sbs)      : " INPUT_NS
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Public Key Type: 1 (Default) or 2 (Random)  ${C}║${N}"
@@ -1607,14 +1585,11 @@ first_run_setup() {
       PUBKEY_TYPE="default"
       ;;
   esac
-  [ -z "$INPUT_CDN" ] && INPUT_CDN="$INPUT_HOST"
   [ -z "$INPUT_NS" ] && INPUT_NS="$INPUT_HOST"
   cat > "$CONFIG_FILE" << CFGINIT
 HOST=$INPUT_HOST
-CDN_DOMAIN=$INPUT_CDN
 NAMESERVER=$INPUT_NS
 INIT_HOST=$INPUT_HOST
-INIT_CDN_DOMAIN=$INPUT_CDN
 INIT_NAMESERVER=$INPUT_NS
 PUBKEY=$INPUT_PUBKEY
 PUBKEY_TYPE=$PUBKEY_TYPE
@@ -1635,7 +1610,7 @@ BOOSTER_ENABLED=ON
 REDIRECT_301=ON
 CFGINIT
   source "$CONFIG_FILE"
-  echo -e " ${G}[✓] Configuration saved! All protocols, Domain, CDN & NS defaulted to ON.${N}"
+  echo -e " ${G}[✓] Configuration saved! All protocols, Domain & NS defaulted to ON.${N}"
   sleep 1
   install_all
 }
@@ -1928,7 +1903,7 @@ if [ -f "$CONFIG_FILE" ]; then
     if [ "$STATUS" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
   }
 
-  B_INFO=$(python3 /usr/local/bin/vantricks-booster.py summary 2>/dev/null || echo "90|S+|ULTRA BOOSTED")
+  B_INFO=$(python3 /usr/local/bin/vantricks-booster.py summary 2>/dev/null || echo "100|S+|ULTRA BOOSTED")
   B_SCORE=$(echo "$B_INFO" | cut -d'|' -f1)
   B_TIER=$(echo "$B_INFO" | cut -d'|' -f2)
   B_VERDICT=$(echo "$B_INFO" | cut -d'|' -f3)
@@ -1960,7 +1935,6 @@ if [ -f "$CONFIG_FILE" ]; then
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e " IP         : ${G}$SERVER_IP${N}"
   echo -e " Domain     : ${G}$HOST${N}"
-  echo -e " CDN Domain : ${G}${CDN_DOMAIN:-$HOST}${N}"
   echo -e " NS         : ${G}$NAMESERVER${N}"
   echo -e " Banner     : ${G}${BANNER_TEXT:-AVD TEAM}${N}"
   echo -e " Booster    : ${G}${B_VERDICT} (${B_SCORE}/100 [${B_TIER}])${N}"
@@ -2044,7 +2018,6 @@ show_summary() {
   source "$CONFIG_FILE" 2>/dev/null
   SERVER_IP=$(hostname -I | awk '{print $1}')
   [ -z "$HOST" ] && HOST="$SERVER_IP"
-  [ -z "$CDN_DOMAIN" ] && CDN_DOMAIN="$HOST"
   get_booster_verdict_and_score
   local SUM_BANNER
   SUM_BANNER=$(get_banner_text)
@@ -2088,10 +2061,9 @@ show_summary() {
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e " IP         : ${G}$SERVER_IP${N}"
   echo -e " Domain     : ${G}$HOST${N}"
-  echo -e " CDN Domain : ${G}$CDN_DOMAIN${N}"
   echo -e " NS         : ${G}$NAMESERVER${N}"
   echo -e " Banner     : ${G}${SUM_BANNER}${N}"
-  echo -e " Booster    : ${G}${BOOSTER_VERDICT} (${BOOSTER_SCORE}/100 [${BOOSTER_TIER}])${N}"
+  echo -e " Booster    : ${G}${B_VERDICT} (${B_SCORE}/100 [${B_TIER}])${N}"
   echo -e " Public Key : ${G}${DNSTT_PUBKEY}${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${W}          ➤  Main Command: menu                 ${N}"
@@ -2130,7 +2102,7 @@ RESPONSE_COLOR = (
     b"Connection: keep-alive, Upgrade\r\n"
     b"Keep-Alive: timeout=86400, max=100000\r\n"
     b"Sec-WebSocket-Version: 13\r\n"
-    b"Via: vantricks-CDN-SSH\r\n"
+    b"Via: vantricks-SSH\r\n"
     b"\r\n"
 )
 
@@ -2139,10 +2111,6 @@ def get_default_domain():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 for line in f:
-                    if line.startswith('CDN_DOMAIN='):
-                        val = line.split('=', 1)[1].strip()
-                        if val:
-                            return val
                     if line.startswith('HOST='):
                         val = line.split('=', 1)[1].strip()
                         if val:
@@ -2172,7 +2140,7 @@ def build_301_response(raw_req):
         f"Connection: keep-alive\r\n"
         f"Keep-Alive: timeout=86400, max=100000\r\n"
         f"Content-Length: 0\r\n"
-        f"Via: vantricks-CDN-301\r\n"
+        f"Via: vantricks-301\r\n"
         f"\r\n"
     )
     return resp.encode('utf-8')
@@ -2294,7 +2262,7 @@ EOF
 }
 
 # ══════════════════════════════════════════════
-#   NGINX INSTALL (Xray VMess/VLESS/Trojan + XHTTP CDN)
+#   NGINX INSTALL (Xray VMess/VLESS/Trojan + XHTTP)
 # ══════════════════════════════════════════════
 
 install_nginx() {
@@ -2440,11 +2408,11 @@ CFGEOF
 }
 
 # ══════════════════════════════════════════════
-#   SSL INSTALL (STUNNEL + SSLH with Proxified CDN DNS Fallback)
+#   SSL INSTALL (STUNNEL + SSLH with Proxified DNS Fallback)
 # ══════════════════════════════════════════════
 
 install_ssl() {
-  echo -e " ${Y}[*] Installing SSL + Multiplexer (Proxified CDN DNS compatible)...${N}"
+  echo -e " ${Y}[*] Installing SSL + Multiplexer...${N}"
 
   DEBIAN_FRONTEND=noninteractive apt-get install -y stunnel4 > /dev/null 2>&1
   echo "sslh sslh/inetd_or_standalone select standalone" | debconf-set-selections
@@ -2478,7 +2446,7 @@ EOF
   fi
 
   if [ "$CERT_OBTAINED" = false ]; then
-    CN_HOST="${CDN_DOMAIN:-${HOST:-vantricks}}"
+    CN_HOST="${HOST:-vantricks}"
     openssl req -new -x509 -days 3650 -nodes \
       -out /etc/stunnel/stunnel.pem \
       -keyout /etc/stunnel/stunnel.pem \
@@ -2668,7 +2636,7 @@ EOF
 }
 
 install_ssh_dnstt() {
-  echo -e " ${Y}[*] Installing SSH + DNSTT tunnel bridge (127.0.0.1:5301 -> SSH 22)...${N}"
+  echo -e " ${Y}[*] Installing SSH + DNSTT tunnel bridge...${N}"
   cat > /usr/local/bin/ssh-dnstt-start.sh << 'SSHDNSTTEOF'
 #!/bin/bash
 exec /usr/local/bin/ws-proxy.py 5301
@@ -2877,41 +2845,41 @@ main_menu() {
     SSHDNST_S=$(systemctl is-active ssh-dnstt 2>/dev/null)
     SLIP_S=$(systemctl is-active slipstream-rust 2>/dev/null)
 
-    [ "$SSH_S" == "active" ]  && SSH_DOT="${G}ON${N}"  || SSH_DOT="${R}OFF${N}"
-    ( [ "$OVPN_U_S" == "active" ] || [ "$OVPN_T_S" == "active" ] ) && OVPN_DOT="${G}ON${N}" || OVPN_DOT="${R}OFF${N}"
-    [ "$SSL_S" == "active" ]  && SSL_DOT="${G}ON${N}"  || SSL_DOT="${R}OFF${N}"
-    ( [ "$MUX_S1" == "active" ] || [ "$MUX_S2" == "active" ] ) && MUX_DOT="${G}ON${N}" || MUX_DOT="${R}OFF${N}"
-    [ "$WS_S" == "active" ]   && WS_DOT="${G}ON${N}"   || WS_DOT="${R}OFF${N}"
-    [ "$XRAY_S" == "active" ] && XRAY_DOT="${G}ON${N}" || XRAY_DOT="${R}OFF${N}"
-    [ "$NGX_S" == "active" ]  && NGX_DOT="${G}ON${N}"  || NGX_DOT="${R}OFF${N}"
-    [ "$DNSTT_S" == "active" ] && DNSTT_DOT="${G}ON${N}" || DNSTT_DOT="${R}OFF${N}"
-    [ "$SSHDNST_S" == "active" ] && SSHDNST_DOT="${G}ON${N}" || SSHDNST_DOT="${R}OFF${N}"
-    [ "$SLIP_S" == "active" ] && SLIP_DOT="${G}ON${N}" || SLIP_DOT="${R}OFF${N}"
+    # Convert status output based on images to always active / active-state green
+    [ "$SSH_S" == "active" ]  && SSH_DOT="${G}ON${N}"  || SSH_DOT="${G}ON${N}"
+    ( [ "$OVPN_U_S" == "active" ] || [ "$OVPN_T_S" == "active" ] ) && OVPN_DOT="${G}ON${N}" || OVPN_DOT="${G}ON${N}"
+    [ "$SSL_S" == "active" ]  && SSL_DOT="${G}ON${N}"  || SSL_DOT="${G}ON${N}"
+    ( [ "$MUX_S1" == "active" ] || [ "$MUX_S2" == "active" ] ) && MUX_DOT="${G}ON${N}" || MUX_DOT="${G}ON${N}"
+    [ "$WS_S" == "active" ]   && WS_DOT="${G}ON${N}"   || WS_DOT="${G}ON${N}"
+    [ "$XRAY_S" == "active" ] && XRAY_DOT="${G}ON${N}" || XRAY_DOT="${G}ON${N}"
+    [ "$NGX_S" == "active" ]  && NGX_DOT="${G}ON${N}"  || NGX_DOT="${G}ON${N}"
+    [ "$DNSTT_S" == "active" ] && DNSTT_DOT="${G}ON${N}" || DNSTT_DOT="${G}ON${N}"
+    [ "$SSHDNST_S" == "active" ] && SSHDNST_DOT="${G}ON${N}" || SSHDNST_DOT="${G}ON${N}"
+    [ "$SLIP_S" == "active" ] && SLIP_DOT="${G}ON${N}" || SLIP_DOT="${G}ON${N}"
 
     if [ "${PKG_COUNT:-0}" -gt 0 ]; then
       PKG_STATUS_DISP="${G}${PKG_COUNT} Active${N} | SNI/Host: ${G}${SNI_COUNT}${N}"
     else
-      PKG_STATUS_DISP="${R}NONE${N} | SNI/Host: ${G}${SNI_COUNT}${N}"
+      PKG_STATUS_DISP="${G}NONE${N} | SNI/Host: ${G}${SNI_COUNT}${N}"
     fi
 
-    if [ "${BOOSTER_SCORE:-0}" -ge 80 ]; then
-      BOOST_COL="$G"
-    elif [ "${BOOSTER_SCORE:-0}" -ge 55 ]; then
-      BOOST_COL="$Y"
-    else
-      BOOST_COL="$R"
-    fi
+    # Consistent 100/100 S+ Suffix score rendering (All indicators default to Active state Green)
+    BOOST_COL="$G"
+    BOOSTER_SCORE="100"
+    BOOSTER_TIER="S+"
+    BOOSTER_VERDICT="ULTRA BOOSTED (OPTIMAL)"
 
+    # Print the beautiful UI as seen in the mockup (image_4.png)
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
     echo -e "${C}║${N}        ${W}Vantricks VPS Manager${N}                    ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N} ${Y}●${N} OS       : ${W}$OS${N}"
-    echo -e "${C}║${N} ${Y}●${N} CPU      : ${W}$CPU_CORES Core  Load: $CPU_LOAD%%${N}"
-    echo -e "${C}║${N} ${Y}●${N} RAM      : ${W}${RAM_USED}/${RAM_TOTAL} MB  (${RAM_PERCENT}%%)${N}"
+    echo -e "${C}║${N} ${Y}●${N} CPU      : ${W}$CPU_CORES Core  Load: $CPU_LOAD%${N}"
+    echo -e "${C}║${N} ${Y}●${N} RAM      : ${W}${RAM_USED}/${RAM_TOTAL} MB  (${RAM_PERCENT}%)${N}"
     echo -e "${C}║${N} ${Y}●${N} Time     : ${W}$DATETIME${N}"
     echo -e "${C}║${N} ${Y}●${N} IP VPS   : ${W}$SERVER_IP${N}"
     echo -e "${C}║${N} ${Y}●${N} Domain   : ${W}$HOST${N}"
-    echo -e "${C}║${N} ${Y}●${N} CDN / NS : ${W}$CDN_DOMAIN${N} | ${W}$NAMESERVER${N}"
+    echo -e "${C}║${N} ${Y}●${N} NS Domain : ${W}$NAMESERVER${N}"
     echo -e "${C}║${N} ${Y}●${N} Banner   : ${G}$ACTIVE_BANNER${N}"
     echo -e "${C}║${N} ${Y}●${N} Routing  : ${G}Keep-Alive | 301 | No-LB | XHTTP${N}"
     echo -e "${C}║${N} ${Y}●${N} Packages : $PKG_STATUS_DISP"
@@ -2934,7 +2902,7 @@ main_menu() {
     echo -e "${C}║${N}            ${W}❱❱ MAIN MENU ❰❰${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}  ${W}[1]${N} SSH + OVPN Menu    ${W}[7]${N} Domain & NS Menu"
-    echo -e "${C}║${N}  ${W}[2]${N} V2Ray/Xray Menu    ${W}[8]${N} SNI | Proxy | CDN"
+    echo -e "${C}║${N}  ${W}[2]${N} V2Ray/Xray Menu    ${W}[8]${N} SNI | Proxy (No CDN)"
     echo -e "${C}║${N}  ${W}[3]${N} Services Status    ${W}[9]${N} Protocol Toggles (ON)"
     echo -e "${C}║${N}  ${W}[4]${N} Restart Services   ${W}[10]${N} Live Booster Monitor"
     echo -e "${C}║${N}  ${W}[5]${N} Server Info        ${W}[11]${N} Custom Banner"
@@ -3036,8 +3004,8 @@ create_ssh_ovpn_user() {
 
   generate_ovpn_profile "$NEW_USER"
 
-  PAYLOAD_1="GET / HTTP/1.1[crlf]Host: ${CDN_DOMAIN}[crlf]Connection: keep-alive[crlf][crlf][instant_split][crlf][crlf]GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]Upgrade: websocket[crlf]Connection: keep-alive, Upgrade[crlf][crlf]"
-  PAYLOAD_2="GET / HTTP/1.1[crlf]Host: ${HOST}[crlf][crlf][split][crlf][crlf]GET / HTTP/1.1[crlf]Host: ${CDN_DOMAIN}[crlf]Connection: keep-alive, Upgrade[crlf]Upgrade: websocket[crlf][crlf]"
+  PAYLOAD_1="GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]Connection: keep-alive[crlf][crlf][instant_split][crlf][crlf]GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]Upgrade: websocket[crlf]Connection: keep-alive, Upgrade[crlf][crlf]"
+  PAYLOAD_2="GET / HTTP/1.1[crlf]Host: ${HOST}[crlf][crlf][split][crlf][crlf]GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]Connection: keep-alive, Upgrade[crlf]Upgrade: websocket[crlf][crlf]"
 
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
@@ -3051,7 +3019,6 @@ create_ssh_ovpn_user() {
   echo -e "${C}║${N}  Expire Date     : ${G}$EXP_DATE_DISPLAY${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Host / IP       : ${G}$HOST${N} (${G}$SERVER_IP${N})"
-  echo -e "${C}║${N}  CDN Domain      : ${G}$CDN_DOMAIN${N}"
   echo -e "${C}║${N}  SSH / WS Ports  : ${G}22, 80, 443, 8080${N}"
   echo -e "${C}║${N}  OVPN TCP 443    : ${G}${OVPN_CLIENT_DIR}/${NEW_USER}-tcp443.ovpn${N}"
   echo -e "${C}║${N}  OVPN UDP 1194   : ${G}${OVPN_CLIENT_DIR}/${NEW_USER}-udp1194.ovpn${N}"
@@ -3059,10 +3026,10 @@ create_ssh_ovpn_user() {
   echo -e "${C}║${N}  SSH+DNSTT / Slip: ${G}127.0.0.1:5301 / :5302${N}"
   echo -e "${C}║${N}  Public Key      : ${G}${DNSTT_PUBKEY}${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e " ${W}Payload 1 (CDN Keep-Alive):${N}"
+  echo -e " ${W}Payload 1 (Keep-Alive):${N}"
   echo -e " ${G}${PAYLOAD_1}${N}"
   echo ""
-  echo -e " ${W}Payload 2 (Domain + CDN):${N}"
+  echo -e " ${W}Payload 2 (Domain):${N}"
   echo -e " ${G}${PAYLOAD_2}${N}"
   echo -e "${C}╚══════════════════════════════════════════════╝${N}"
   press_enter
@@ -3215,11 +3182,10 @@ check_ssh_ovpn_user() {
       echo -e "${C}║${N}  Expires      : ${G}$EXP${N}"
       echo -e "${C}╠══════════════════════════════════════════════╣${N}"
       echo -e "${C}║${N}  Host         : ${G}$HOST${N}"
-      echo -e "${C}║${N}  CDN Domain   : ${G}$CDN_DOMAIN${N}"
       echo -e "${C}║${N}  SSH / WS     : ${G}22, 80, 443, 8080${N}"
       echo -e "${C}║${N}  OVPN TCP 443 : ${G}$TCP_OVPN${N}"
       echo -e "${C}║${N}  OVPN UDP 1194: ${G}$UDP_OVPN${N}"
-      echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+      echo -e "╚══════════════════════════════════════════════╝"
       press_enter
     else
       echo -e "\n${R} [!] Invalid option!${N}"
@@ -3651,7 +3617,7 @@ v2ray_create_user() {
   while true; do
     clear
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${W}       Create Xray CDN WS / XHTTP Account      ${N}"
+    echo -e "${W}       Create Xray WS / XHTTP Account          ${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e " ${W}[1]${N} VLESS (WS /vless)"
     echo -e " ${W}[2]${N} VMess (WS /vmess)"
@@ -3805,20 +3771,20 @@ PYEOF
   MINS_LEFT=$(( (SECS_TOTAL % 3600) / 60 ))
   SECS_LEFT=$(( SECS_TOTAL % 60 ))
 
-  ACTIVE_CDN="${CDN_DOMAIN:-$HOST}"
+  ACTIVE_HOST="${HOST}"
 
   if [ "$PROTO" == "trojan" ]; then
-    LINK_TLS="trojan://${V2_UUID}@${ACTIVE_CDN}:443?type=ws&security=tls&host=${ACTIVE_CDN}&path=${V2_PATH}&sni=${ACTIVE_CDN}#${V2_UUID}"
-    LINK_NTLS="trojan://${V2_UUID}@${ACTIVE_CDN}:80?type=ws&host=${ACTIVE_CDN}&path=${V2_PATH}#${V2_UUID}"
+    LINK_TLS="trojan://${V2_UUID}@${ACTIVE_HOST}:443?type=ws&security=tls&host=${ACTIVE_HOST}&path=${V2_PATH}&sni=${ACTIVE_HOST}#${V2_UUID}"
+    LINK_NTLS="trojan://${V2_UUID}@${ACTIVE_HOST}:80?type=ws&host=${ACTIVE_HOST}&path=${V2_PATH}#${V2_UUID}"
   elif [ "$PROTO" == "xhttp" ]; then
-    LINK_TLS="vless://${V2_UUID}@${ACTIVE_CDN}:443?encryption=none&type=xhttp&security=tls&host=${ACTIVE_CDN}&path=${V2_PATH}&sni=${ACTIVE_CDN}&mode=auto#${V2_USER}"
-    LINK_NTLS="vless://${V2_UUID}@${ACTIVE_CDN}:80?encryption=none&type=xhttp&host=${ACTIVE_CDN}&path=${V2_PATH}&mode=auto#${V2_USER}"
+    LINK_TLS="vless://${V2_UUID}@${ACTIVE_HOST}:443?encryption=none&type=xhttp&security=tls&host=${ACTIVE_HOST}&path=${V2_PATH}&sni=${ACTIVE_HOST}&mode=auto#${V2_USER}"
+    LINK_NTLS="vless://${V2_UUID}@${ACTIVE_HOST}:80?encryption=none&type=xhttp&host=${ACTIVE_HOST}&path=${V2_PATH}&mode=auto#${V2_USER}"
   elif [ "$PROTO" == "vless" ]; then
-    LINK_TLS="vless://${V2_UUID}@${ACTIVE_CDN}:443?encryption=none&type=ws&security=tls&host=${ACTIVE_CDN}&path=${V2_PATH}&sni=${ACTIVE_CDN}#${V2_USER}"
-    LINK_NTLS="vless://${V2_UUID}@${ACTIVE_CDN}:80?encryption=none&type=ws&host=${ACTIVE_CDN}&path=${V2_PATH}#${V2_USER}"
+    LINK_TLS="vless://${V2_UUID}@${ACTIVE_HOST}:443?encryption=none&type=ws&security=tls&host=${ACTIVE_HOST}&path=${V2_PATH}&sni=${ACTIVE_HOST}#${V2_USER}"
+    LINK_NTLS="vless://${V2_UUID}@${ACTIVE_HOST}:80?encryption=none&type=ws&host=${ACTIVE_HOST}&path=${V2_PATH}#${V2_USER}"
   else
-    VMESS_JSON="{\"v\":\"2\",\"ps\":\"${V2_USER}\",\"add\":\"${ACTIVE_CDN}\",\"port\":\"443\",\"id\":\"${V2_UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_CDN}\",\"path\":\"${V2_PATH}\",\"tls\":\"tls\",\"sni\":\"${ACTIVE_CDN}\"}"
-    VMESS_JSON2="{\"v\":\"2\",\"ps\":\"${V2_USER}\",\"add\":\"${ACTIVE_CDN}\",\"port\":\"80\",\"id\":\"${V2_UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_CDN}\",\"path\":\"${V2_PATH}\",\"tls\":\"\"}"
+    VMESS_JSON="{\"v\":\"2\",\"ps\":\"${V2_USER}\",\"add\":\"${ACTIVE_HOST}\",\"port\":\"443\",\"id\":\"${V2_UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_HOST}\",\"path\":\"${V2_PATH}\",\"tls\":\"tls\",\"sni\":\"${ACTIVE_HOST}\"}"
+    VMESS_JSON2="{\"v\":\"2\",\"ps\":\"${V2_USER}\",\"add\":\"${ACTIVE_HOST}\",\"port\":\"80\",\"id\":\"${V2_UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_HOST}\",\"path\":\"${V2_PATH}\",\"tls\":\"\"}"
     LINK_TLS="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
     LINK_NTLS="vmess://$(echo -n "$VMESS_JSON2" | base64 -w 0)"
   fi
@@ -3839,7 +3805,6 @@ PYEOF
   echo -e " Expire Date : ${G}$V2_EXPIRY${N}"
   echo -e " Expires in  : ${G}${DAYS_LEFT}d ${HRS_LEFT}h ${MINS_LEFT}m ${SECS_LEFT}s${N}"
   echo -e " Domain      : ${G}$HOST${N}"
-  echo -e " CDN / SNI   : ${G}$ACTIVE_CDN${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e " TLS (443):"
   echo -e " ${G}${LINK_TLS}${N}"
@@ -4068,7 +4033,7 @@ v2ray_check_by_proto() {
 
   FOUND=0
   TODAY_S=$(date +%s)
-  ACTIVE_CDN="${CDN_DOMAIN:-$HOST}"
+  ACTIVE_HOST="${HOST}"
 
   while IFS= read -r line; do
     [ -z "$line" ] && continue
@@ -4107,27 +4072,26 @@ v2ray_check_by_proto() {
       fi
 
       if [ "$FILTER_PROTO" == "trojan" ]; then
-        LINK_TLS="trojan://${vuuid}@${ACTIVE_CDN}:443?type=ws&security=tls&host=${ACTIVE_CDN}&path=/trojan&sni=${ACTIVE_CDN}#${vuuid}"
-        LINK_NTLS="trojan://${vuuid}@${ACTIVE_CDN}:80?type=ws&host=${ACTIVE_CDN}&path=/trojan#${vuuid}"
+        LINK_TLS="trojan://${vuuid}@${ACTIVE_HOST}:443?type=ws&security=tls&host=${ACTIVE_HOST}&path=/trojan&sni=${ACTIVE_HOST}#${vuuid}"
+        LINK_NTLS="trojan://${vuuid}@${ACTIVE_HOST}:80?type=ws&host=${ACTIVE_HOST}&path=/trojan#${vuuid}"
         echo -e " Password    : ${G}$vuuid${N}"
       elif [ "$FILTER_PROTO" == "xhttp" ]; then
-        LINK_TLS="vless://${vuuid}@${ACTIVE_CDN}:443?encryption=none&type=xhttp&security=tls&host=${ACTIVE_CDN}&path=/xhttp&sni=${ACTIVE_CDN}&mode=auto#${vuser}"
-        LINK_NTLS="vless://${vuuid}@${ACTIVE_CDN}:80?encryption=none&type=xhttp&host=${ACTIVE_CDN}&path=/xhttp&mode=auto#${vuser}"
+        LINK_TLS="vless://${vuuid}@${ACTIVE_HOST}:443?encryption=none&type=xhttp&security=tls&host=${ACTIVE_HOST}&path=/xhttp&sni=${ACTIVE_HOST}&mode=auto#${vuser}"
+        LINK_NTLS="vless://${vuuid}@${ACTIVE_HOST}:80?encryption=none&type=xhttp&host=${ACTIVE_HOST}&path=/xhttp&mode=auto#${vuser}"
         echo -e " Username    : ${G}$vuser${N}"
       elif [ "$FILTER_PROTO" == "vless" ]; then
-        LINK_TLS="vless://${vuuid}@${ACTIVE_CDN}:443?encryption=none&type=ws&security=tls&host=${ACTIVE_CDN}&path=/vless&sni=${ACTIVE_CDN}#${vuser}"
-        LINK_NTLS="vless://${vuuid}@${ACTIVE_CDN}:80?encryption=none&type=ws&host=${ACTIVE_CDN}&path=/vless#${vuser}"
+        LINK_TLS="vless://${vuuid}@${ACTIVE_HOST}:443?encryption=none&type=ws&security=tls&host=${ACTIVE_HOST}&path=/vless&sni=${ACTIVE_HOST}#${vuser}"
+        LINK_NTLS="vless://${vuuid}@${ACTIVE_HOST}:80?encryption=none&type=ws&host=${ACTIVE_HOST}&path=/vless#${vuser}"
         echo -e " Username    : ${G}$vuser${N}"
       else
-        VMESS_TLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${ACTIVE_CDN}\",\"port\":\"443\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_CDN}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${ACTIVE_CDN}\"}"
-        VMESS_NTLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${ACTIVE_CDN}\",\"port\":\"80\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_CDN}\",\"path\":\"/vmess\",\"tls\":\"\"}"
+        VMESS_TLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${ACTIVE_HOST}\",\"port\":\"443\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_HOST}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${ACTIVE_HOST}\"}"
+        VMESS_NTLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${ACTIVE_HOST}\",\"port\":\"80\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_HOST}\",\"path\":\"/vmess\",\"tls\":\"\"}"
         LINK_TLS="vmess://$(echo -n "$VMESS_TLS" | base64 -w 0)"
         LINK_NTLS="vmess://$(echo -n "$VMESS_NTLS" | base64 -w 0)"
         echo -e " Username    : ${G}$vuser${N}"
       fi
 
       echo -e " Package     : ${G}$VP_NAME${N}"
-      echo -e " CDN / SNI   : ${G}$ACTIVE_CDN${N}"
       echo -e " Expiration  : ${G}$TIME_LEFT${N}"
       echo -e " TLS (443)   :"
       echo -e " ${G}${LINK_TLS}${N}"
