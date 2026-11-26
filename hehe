@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =============================================
-#   Vantricks VPS MANAGER (SSH + OVPN + XRAY/WS)
+#   VANTRICKS VPS MANAGER 
 #   OS: Debian/Ubuntu | DNS Ready
 # =============================================
 
@@ -20,6 +20,8 @@ ACCOUNT_PKG_DB="/etc/vantricks_account_packages.db"
 SNI_PROXY_HOST_FILE="/etc/vantricks_sni_proxy_hosts.list"
 BOOSTER_SYSCTL_CONF="/etc/sysctl.d/99-vantricks-booster.conf"
 BOOSTER_SCRIPT="/usr/local/bin/vantricks-booster.py"
+SLIPSTREAM_BIN="/usr/local/bin/slipstream-server"
+SLIPSTREAM_DIR="/etc/slipstream-rust"
 OVPN_DIR="/etc/openvpn/server"
 OVPN_CLIENT_DIR="/etc/openvpn/client"
 XRAY_CONF="/usr/local/etc/xray/config.json"
@@ -36,8 +38,12 @@ PROTO_MUX="ON"
 PROTO_WS="ON"
 PROTO_NGINX="ON"
 PROTO_XRAY="ON"
+PROTO_XHTTP="ON"
 PROTO_DNSTT="ON"
+PROTO_SSH_DNSTT="ON"
+PROTO_SLIPSTREAM="ON"
 BOOSTER_ENABLED="ON"
+REDIRECT_301="ON"
 
 # ── PASSWORD CHECK ────────────────────────────────
 check_password() {
@@ -63,7 +69,7 @@ check_password() {
 # ─────────────────────────────────────────────────
 
 # ══════════════════════════════════════════════
-#   HELPERS, PACKAGE GATE & HOST DOMAIN SYNC
+#   HELPERS, PACKAGE GATE & HOST / CDN / NS SYNC
 # ══════════════════════════════════════════════
 
 press_enter() {
@@ -73,7 +79,7 @@ press_enter() {
 
 check_root() {
   if [ "$EUID" -ne 0 ]; then
-    echo -e "${R}[ERROR] Please run as root: sudo bash vantricks_manager.sh${N}"
+    echo -e "${R}[ERROR] Please run as root: sudo bash van.sh${N}"
     exit 1
   fi
 }
@@ -105,8 +111,12 @@ ensure_default_toggles() {
     "PROTO_WS=${PROTO_WS:-ON}"
     "PROTO_NGINX=${PROTO_NGINX:-ON}"
     "PROTO_XRAY=${PROTO_XRAY:-ON}"
+    "PROTO_XHTTP=${PROTO_XHTTP:-ON}"
     "PROTO_DNSTT=${PROTO_DNSTT:-ON}"
+    "PROTO_SSH_DNSTT=${PROTO_SSH_DNSTT:-ON}"
+    "PROTO_SLIPSTREAM=${PROTO_SLIPSTREAM:-ON}"
     "BOOSTER_ENABLED=${BOOSTER_ENABLED:-ON}"
+    "REDIRECT_301=${REDIRECT_301:-ON}"
     "AUTO_REBOOT_ON_SAVE=${AUTO_REBOOT_ON_SAVE:-ON}"
   )
 
@@ -158,9 +168,9 @@ toggle_auto_reboot() {
   sleep 1
 }
 
-# ══════════════════════════════════════════════
-#   PYTHON REAL-TIME ENHANCEMENT BOOSTER & ENGINE
-# ══════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+#   PYTHON REAL-TIME ENHANCEMENT BOOSTER & LIVE TELEMETRY ENGINE
+# ══════════════════════════════════════════════════════════════
 
 install_booster_python() {
   mkdir -p /usr/local/bin /etc/sysctl.d
@@ -176,6 +186,7 @@ import subprocess
 SYSCTL_FILE = "/etc/sysctl.d/99-vantricks-booster.conf"
 SNI_LIST_FILE = "/etc/vantricks_sni_proxy_hosts.list"
 CONFIG_FILE = "/etc/vantricks_script.conf"
+NGINX_CONF = "/etc/nginx/conf.d/v2ray.conf"
 
 SYSCTL_PARAMS = {
     "net.core.default_qdisc": "fq",
@@ -188,6 +199,8 @@ SYSCTL_PARAMS = {
     "net.ipv4.tcp_keepalive_time": "60",
     "net.ipv4.tcp_keepalive_intvl": "15",
     "net.ipv4.tcp_keepalive_probes": "4",
+    "net.ipv4.tcp_slow_start_after_idle": "0",
+    "net.ipv4.tcp_notsent_lowat": "16384",
     "net.core.rmem_max": "67108864",
     "net.core.wmem_max": "67108864",
     "net.core.rmem_default": "1048576",
@@ -213,6 +226,8 @@ SERVICES = [
     ("NGINX", ["nginx"]),
     ("XRAY", ["xray"]),
     ("DNSTT", ["dnstt"]),
+    ("SSH-DNSTT", ["ssh-dnstt"]),
+    ("SLIPSTREAM", ["slipstream-rust"]),
 ]
 
 def run_cmd(cmd):
@@ -230,13 +245,24 @@ def read_sysctl(key):
     except Exception:
         return run_cmd(["sysctl", "-n", key])
 
+def load_conf():
+    cfg = {}
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip()
+    return cfg
+
 def apply_booster():
     subprocess.run(["modprobe", "tcp_bbr"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     os.makedirs("/etc/modules-load.d", exist_ok=True)
     with open("/etc/modules-load.d/vantricks-bbr.conf", "w") as mf:
         mf.write("tcp_bbr\n")
 
-    lines = ["# Vantricks Real-Time Kernel & Network Enhancement Booster"]
+    lines = ["# Vantricks Real-Time Python Kernel & Network Enhancement Booster"]
     for k, v in SYSCTL_PARAMS.items():
         lines.append(f"{k} = {v}")
         subprocess.run(["sysctl", "-w", f"{k}={v}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -245,7 +271,6 @@ def apply_booster():
         sf.write("\n".join(lines) + "\n")
     subprocess.run(["sysctl", "--system"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # Apply fq qdisc on default interface immediately
     route_out = run_cmd(["ip", "route", "show", "default"])
     if route_out:
         parts = route_out.split()
@@ -267,11 +292,28 @@ def get_sni_hosts():
     with open(SNI_LIST_FILE, "r") as f:
         return [line.strip() for line in f if line.strip()]
 
+def check_nginx_and_xhttp():
+    has_301 = False
+    has_keepalive = False
+    no_lb = True
+    has_xhttp = False
+    if os.path.exists(NGINX_CONF):
+        try:
+            with open(NGINX_CONF, "r") as f:
+                txt = f.read()
+            has_301 = "return 301" in txt
+            has_keepalive = "keepalive_timeout" in txt and "Keep-Alive" in txt
+            no_lb = "upstream " not in txt
+            has_xhttp = "/xhttp" in txt and "10089" in txt
+        except Exception:
+            pass
+    return has_301, has_keepalive, no_lb, has_xhttp
+
 def evaluate_metrics():
     score = 0
     details = {}
+    cfg = load_conf()
 
-    # 1. BBR + FQ Congestion Control (25 pts)
     cc = read_sysctl("net.ipv4.tcp_congestion_control")
     qd = read_sysctl("net.core.default_qdisc")
     bbr_pts = 0
@@ -286,32 +328,39 @@ def evaluate_metrics():
     details["qdisc"] = qd or "unknown"
     details["bbr_pts"] = bbr_pts
 
-    # 2. TCP Buffers, FastOpen & Keepalive (25 pts)
     rmem = read_sysctl("net.core.rmem_max")
     tfo = read_sysctl("net.ipv4.tcp_fastopen")
     ka = read_sysctl("net.ipv4.tcp_keepalive_time")
+    has_301, has_ka_hdr, no_lb, has_xhttp = check_nginx_and_xhttp()
     buf_pts = 0
     try:
         if int(rmem) >= 16777216:
-            buf_pts += 12
+            buf_pts += 8
         elif int(rmem) >= 2097152:
-            buf_pts += 6
+            buf_pts += 4
     except Exception:
         pass
     if tfo in ("3", "2", "1"):
-        buf_pts += 7
+        buf_pts += 4
     try:
         if int(ka) <= 120:
-            buf_pts += 6
+            buf_pts += 4
     except Exception:
         pass
+    if has_ka_hdr and has_301 and no_lb:
+        buf_pts += 5
+    if has_xhttp:
+        buf_pts += 4
     score += buf_pts
     details["rmem_max"] = rmem or "0"
     details["fastopen"] = tfo or "0"
     details["keepalive"] = ka or "7200"
+    details["has_301"] = has_301
+    details["has_ka_hdr"] = has_ka_hdr
+    details["no_lb"] = no_lb
+    details["has_xhttp"] = has_xhttp
     details["buf_pts"] = buf_pts
 
-    # 3. Protocol Services Health (25 pts)
     active_count = 0
     svc_states = {}
     for label, unit_list in SERVICES:
@@ -326,11 +375,15 @@ def evaluate_metrics():
     details["svc_states"] = svc_states
     details["svc_pts"] = svc_pts
 
-    # 4. SNI / Proxy / Host Readiness & Local Latency (15 pts)
     sni_hosts = get_sni_hosts()
+    host_val = cfg.get("HOST", "")
+    ns_val = cfg.get("NAMESERVER", "")
+    cdn_val = cfg.get("CDN_DOMAIN", host_val)
     sni_pts = 0
-    if len(sni_hosts) > 0:
-        sni_pts += 8
+    if host_val and ns_val:
+        sni_pts += 5
+    if cdn_val or len(sni_hosts) > 0:
+        sni_pts += 4
     t0 = time.perf_counter()
     local_ok = False
     for port in (8080, 8880, 22):
@@ -342,14 +395,16 @@ def evaluate_metrics():
             continue
     rtt_ms = round((time.perf_counter() - t0) * 1000, 2)
     if local_ok:
-        sni_pts += 7
+        sni_pts += 6
     score += sni_pts
+    details["host"] = host_val or "N/A"
+    details["ns"] = ns_val or "N/A"
+    details["cdn"] = cdn_val or "N/A"
     details["sni_count"] = len(sni_hosts)
     details["sni_hosts"] = sni_hosts
     details["local_rtt_ms"] = rtt_ms
     details["sni_pts"] = sni_pts
 
-    # 5. Memory & CPU Headroom (10 pts)
     mem_avail_pct = 50.0
     try:
         meminfo = {}
@@ -382,7 +437,6 @@ def evaluate_metrics():
         verdict = "LOW / UNOPTIMIZED"
         tier = "C"
 
-    # Active TCP connections count
     tcp_estab = run_cmd(["ss", "-s"])
     estab_num = "0"
     for line in tcp_estab.splitlines():
@@ -400,7 +454,7 @@ def evaluate_metrics():
         "details": details,
     }
 
-def render_bar(pct, width=22):
+def render_bar(pct, width=20):
     filled = int(round((pct / 100.0) * width))
     return "█" * filled + "░" * (width - filled)
 
@@ -427,9 +481,11 @@ def live_monitor(iterations=0):
             print(f"{C}╠══════════════════════════════════════════════════════╣{N}")
             print(f"{C}║{N}  TCP Congestion : {G}{d['cc'].upper()}{N} | Qdisc: {G}{d['qdisc']}{N} ({d['bbr_pts']}/25 pts)")
             print(f"{C}║{N}  TCP Buffer Max : {G}{d['rmem_max']} B{N} | FastOpen: {G}{d['fastopen']}{N} ({d['buf_pts']}/25 pts)")
-            print(f"{C}║{N}  Keepalive Time : {G}{d['keepalive']}s{N} | Active TCP: {G}{data['estab_tcp']}{N}")
-            print(f"{C}║{N}  Services Up    : {G}{d['active_services']}/{d['total_services']}{N} ({d['svc_pts']}/25 pts)")
-            print(f"{C}║{N}  SNI/Proxy Hosts: {G}{d['sni_count']} Active{N} | Local RTT: {G}{d['local_rtt_ms']} ms{N} ({d['sni_pts']}/15 pts)")
+            print(f"{C}║{N}  Keep-Alive     : {G}{d['keepalive']}s (HTTP KA: {'ON' if d['has_ka_hdr'] else 'OFF'}){N} | TCP Estab: {G}{data['estab_tcp']}{N}")
+            print(f"{C}║{N}  301 + No-LB    : {G}{'301 + NO-LB' if (d['has_301'] and d['no_lb']) else 'CHECK'}{N} | XHTTP: {G}{'ON' if d['has_xhttp'] else 'OFF'}{N}")
+            print(f"{C}║{N}  Protocols Up   : {G}{d['active_services']}/{d['total_services']}{N} ({d['svc_pts']}/25 pts)")
+            print(f"{C}║{N}  Domain / CDN   : {G}{d['host']}{N} -> {G}{d['cdn']}{N}")
+            print(f"{C}║{N}  Nameserver (NS): {G}{d['ns']}{N} | SNI: {G}{d['sni_count']}{N} | RTT: {G}{d['local_rtt_ms']}ms{N}")
             print(f"{C}║{N}  Free RAM Head  : {G}{d['mem_avail_pct']}%{N} ({d['res_pts']}/10 pts)")
             print(f"{C}╠══════════════════════════════════════════════════════╣{N}")
             svc_line = "  "
@@ -520,15 +576,20 @@ enable_all_protocols_default() {
   set_config_kv "PROTO_WS" "ON"
   set_config_kv "PROTO_NGINX" "ON"
   set_config_kv "PROTO_XRAY" "ON"
+  set_config_kv "PROTO_XHTTP" "ON"
   set_config_kv "PROTO_DNSTT" "ON"
+  set_config_kv "PROTO_SSH_DNSTT" "ON"
+  set_config_kv "PROTO_SLIPSTREAM" "ON"
   set_config_kv "BOOSTER_ENABLED" "ON"
+  set_config_kv "REDIRECT_301" "ON"
 
-  for s in ssh openvpn@server openvpn@server-tcp stunnel4 sslh sslh-select ws-proxy-8080 nginx xray dnstt; do
+  for s in ssh openvpn@server openvpn@server-tcp stunnel4 sslh sslh-select ws-proxy-8080 nginx xray dnstt ssh-dnstt slipstream-rust; do
     systemctl enable "$s" > /dev/null 2>&1 || true
     systemctl restart "$s" > /dev/null 2>&1 || true
   done
+  sync_host_config
   apply_enhancement_booster
-  echo -e "\n ${G}[✓] All Protocols & Enhancement Booster set to ON!${N}"
+  echo -e "\n ${G}[✓] All Protocols (SSH, OVPN, SSL, MUX, WS, Nginx, Xray, XHTTP, DNSTT, SSH+DNSTT, Slipstream), Domain, CDN & NS set to ON!${N}"
   sleep 1
 }
 
@@ -547,9 +608,12 @@ protocol_toggles_menu() {
     echo -e "${C}║${N}  ${W}[3]${N} SSL / Stunnel4           : $(fmt_onoff "$PROTO_SSL")"
     echo -e "${C}║${N}  ${W}[4]${N} Multiplexer (SSLH)       : $(fmt_onoff "$PROTO_MUX")"
     echo -e "${C}║${N}  ${W}[5]${N} WebSocket Proxy (8080)   : $(fmt_onoff "$PROTO_WS")"
-    echo -e "${C}║${N}  ${W}[6]${N} Nginx Reverse Proxy      : $(fmt_onoff "$PROTO_NGINX")"
+    echo -e "${C}║${N}  ${W}[6]${N} Nginx (301/KA/No-LB)     : $(fmt_onoff "$PROTO_NGINX")"
     echo -e "${C}║${N}  ${W}[7]${N} Xray (VMess/VLESS/Trojan): $(fmt_onoff "$PROTO_XRAY")"
-    echo -e "${C}║${N}  ${W}[8]${N} DNSTT DNS Tunnel         : $(fmt_onoff "$PROTO_DNSTT")"
+    echo -e "${C}║${N}  ${W}[8]${N} XHTTP Transport (/xhttp) : $(fmt_onoff "$PROTO_XHTTP")"
+    echo -e "${C}║${N}  ${W}[9]${N} DNSTT DNS Tunnel         : $(fmt_onoff "$PROTO_DNSTT")"
+    echo -e "${C}║${N}  ${W}[10]${N} SSH + DNSTT Tunnel (5301): $(fmt_onoff "$PROTO_SSH_DNSTT")"
+    echo -e "${C}║${N}  ${W}[11]${N} Slipstream Tunnel (5302) : $(fmt_onoff "$PROTO_SLIPSTREAM")"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}  ${W}[A]${N} Set ALL Protocols ON (Default)           ${C}║${N}"
     echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                        ${C}║${N}"
@@ -563,7 +627,10 @@ protocol_toggles_menu() {
       5) toggle_single_protocol "PROTO_WS" "WebSocket 8080" "ws-proxy-8080" ;;
       6) toggle_single_protocol "PROTO_NGINX" "Nginx Reverse Proxy" "nginx" ;;
       7) toggle_single_protocol "PROTO_XRAY" "Xray WS" "xray" ;;
-      8) toggle_single_protocol "PROTO_DNSTT" "DNSTT" "dnstt" ;;
+      8) toggle_single_protocol "PROTO_XHTTP" "XHTTP Transport" "xray nginx" ;;
+      9) toggle_single_protocol "PROTO_DNSTT" "DNSTT" "dnstt" ;;
+      10) toggle_single_protocol "PROTO_SSH_DNSTT" "SSH + DNSTT" "ssh-dnstt ssh" ;;
+      11) toggle_single_protocol "PROTO_SLIPSTREAM" "Slipstream" "slipstream-rust" ;;
       a|A) enable_all_protocols_default ;;
       0) break ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
@@ -572,7 +639,7 @@ protocol_toggles_menu() {
 }
 
 # ══════════════════════════════════════════════
-#   SNI | PROXY | HOST MANAGER (ADD / DELETE / SAVE -> REBOOT + BOOSTER)
+#   SNI | PROXY | CDN | HOST MANAGER (ADD / DELETE / SAVE -> REBOOT + BOOSTER)
 # ══════════════════════════════════════════════
 
 sni_proxy_host_menu() {
@@ -586,20 +653,21 @@ sni_proxy_host_menu() {
     clear
     get_booster_verdict_and_score
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-    echo -e "${C}║${N}          ${W}SNI | PROXY | HOST MANAGER${N}          ${C}║${N}"
+    echo -e "${C}║${N}       ${W}SNI | PROXY | CDN | HOST MANAGER${N}       ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  CDN Host : ${G}${CDN_DOMAIN:-$HOST}${N}"
     echo -e "${C}║${N}  Strength : ${G}${BOOSTER_SCORE}/100 [${BOOSTER_TIER}]${N}"
     echo -e "${C}║${N}  Verdict  : ${G}${BOOSTER_VERDICT}${N}"
     if [ "$UNSAVED_CHANGES" -eq 1 ]; then
       echo -e "${C}║${N}  Status   : ${Y}UNSAVED CHANGES (Click [s] Save)${N}"
     else
-      echo -e "${C}║${N}  Status   : ${G}SYNCED${N}"
+      echo -e "${C}║${N}  Status   : ${G}SYNCED (301 + Keep-Alive + No-LB)${N}"
     fi
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
 
     mapfile -t SPH_LIST < "$STAGED_FILE"
     if [ ${#SPH_LIST[@]} -eq 0 ]; then
-      echo -e "${C}║${N}  ${Y}No SNI / Proxy / Host entries configured.${N}"
+      echo -e "${C}║${N}  ${Y}No SNI / Proxy / CDN Host entries configured.${N}"
     else
       local idx=1
       for entry in "${SPH_LIST[@]}"; do
@@ -609,7 +677,7 @@ sni_proxy_host_menu() {
     fi
 
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[a]${N} Add (e.g. cdn.mypocketdoctor.com)        ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[a]${N} Add (e.g. cdn.yourdomain.com)            ${C}║${N}"
     echo -e "${C}║${N}  ${W}[d]${N} Delete Entry                             ${C}║${N}"
     echo -e "${C}║${N}  ${W}[s]${N} Save (Apply Booster + Auto Reboot)       ${C}║${N}"
     echo -e "${C}║${N}  ${W}[0]${N} Back (Discard Unsaved)                   ${C}║${N}"
@@ -619,7 +687,7 @@ sni_proxy_host_menu() {
     case "$SPH_OPT" in
       a|A)
         echo ""
-        read -p "  Enter SNI | Proxy | Host (e.g. cdn.mypocketdoctor.com): " NEW_SPH
+        read -p "  Enter SNI | Proxy | CDN Host (e.g. cdn.yourdomain.com): " NEW_SPH
         NEW_SPH=$(echo "$NEW_SPH" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         if [ -z "$NEW_SPH" ]; then
           echo -e " ${R}[!] Input cannot be empty!${N}"
@@ -663,9 +731,9 @@ sni_proxy_host_menu() {
         cp "$STAGED_FILE" "$SNI_PROXY_HOST_FILE"
         rm -f "$STAGED_FILE"
 
-        # Update primary HOST to latest entry if list is non-empty
         LATEST_SPH=$(tail -n 1 "$SNI_PROXY_HOST_FILE" 2>/dev/null | tr -d '[:space:]')
         if [ -n "$LATEST_SPH" ]; then
+          set_config_kv "CDN_DOMAIN" "$LATEST_SPH"
           set_config_kv "HOST" "$LATEST_SPH"
           if [ -d "$OVPN_CLIENT_DIR" ]; then
             for ovpn in "${OVPN_CLIENT_DIR}"/*-tcp443.ovpn; do
@@ -682,7 +750,7 @@ sni_proxy_host_menu() {
         sync_host_config
         get_booster_verdict_and_score
         echo -e " ${G}[✓] Booster Verdict : ${BOOSTER_VERDICT} (${BOOSTER_SCORE}/100 [${BOOSTER_TIER}])${N}"
-        trigger_auto_reboot "SNI | Proxy | Host saved & Enhancement Booster applied!"
+        trigger_auto_reboot "SNI | Proxy | CDN | Host saved & Enhancement Booster applied!"
         ;;
       0)
         rm -f "$STAGED_FILE"
@@ -817,29 +885,57 @@ sync_host_config() {
   SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -z "$HOST" ] && HOST="$SERVER_IP"
   [ -z "$NAMESERVER" ] && NAMESERVER="$HOST"
+  [ -z "$CDN_DOMAIN" ] && CDN_DOMAIN="$HOST"
 
-  # Build dynamic server_name list including all SNI | Proxy | Host entries
   local EXTRA_HOSTS=""
   if [ -s "$SNI_PROXY_HOST_FILE" ]; then
     EXTRA_HOSTS=$(tr '\n' ' ' < "$SNI_PROXY_HOST_FILE")
   fi
 
-  # Enable TCP keepalive & low-latency tuning at kernel/sysctl level
+  if [ -f /usr/local/bin/dnstt-start.sh ]; then
+    cat > /usr/local/bin/dnstt-start.sh << DNSTTEOF
+#!/bin/bash
+exec /usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/dnstt-priv.key ${NAMESERVER} 127.0.0.1:22
+DNSTTEOF
+    chmod +x /usr/local/bin/dnstt-start.sh
+  fi
+
+  cat > /usr/local/bin/ssh-dnstt-start.sh << SSHDNSTTEOF
+#!/bin/bash
+exec /usr/local/bin/ws-proxy.py 5301
+SSHDNSTTEOF
+  chmod +x /usr/local/bin/ssh-dnstt-start.sh
+
+  if [ -x "$SLIPSTREAM_BIN" ]; then
+    cat > /usr/local/bin/slipstream-start.sh << SLIPSEOF
+#!/bin/bash
+exec ${SLIPSTREAM_BIN} --domain ${NAMESERVER} --listen 127.0.0.1:5302 --target 127.0.0.1:22
+SLIPSEOF
+    chmod +x /usr/local/bin/slipstream-start.sh
+  fi
+
   sysctl -w net.ipv4.tcp_keepalive_time=60 net.ipv4.tcp_keepalive_intvl=15 net.ipv4.tcp_keepalive_probes=4 > /dev/null 2>&1 || true
 
+  # Nginx Single-Backend Reverse Proxy (No Load Balance, Connection Keep-Alive, 301 Moved Permanently, WS + XHTTP)
   if [ -d /etc/nginx/conf.d ]; then
     cat > "$NGINX_V2RAY_CONF" << NGINXEOF
 server {
-    listen 8880;
-    server_name ${HOST} ${EXTRA_HOSTS} _;
+    listen 8880 default_server;
+    server_name ${HOST} ${CDN_DOMAIN} ${EXTRA_HOSTS} _;
     tcp_nodelay on;
+    tcp_nopush on;
+    keepalive_timeout 86400s 86400s;
+    keepalive_requests 100000;
+    client_body_timeout 86400s;
+    client_header_timeout 86400s;
+    send_timeout 86400s;
 
     set \$target_host \$http_host;
     if (\$target_host = "") {
-        set \$target_host "${HOST}";
+        set \$target_host "${CDN_DOMAIN}";
     }
 
-    location /vmess {
+    location = /vmess {
         proxy_pass http://127.0.0.1:10086;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -847,12 +943,17 @@ server {
         proxy_set_header Host \$target_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Keep-Alive "timeout=86400, max=100000";
         proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_socket_keepalive on;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
+        proxy_connect_timeout 30s;
     }
 
-    location /vless {
+    location = /vless {
         proxy_pass http://127.0.0.1:10087;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -860,12 +961,17 @@ server {
         proxy_set_header Host \$target_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Keep-Alive "timeout=86400, max=100000";
         proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_socket_keepalive on;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
+        proxy_connect_timeout 30s;
     }
 
-    location /trojan {
+    location = /trojan {
         proxy_pass http://127.0.0.1:10088;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -873,12 +979,40 @@ server {
         proxy_set_header Host \$target_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Keep-Alive "timeout=86400, max=100000";
         proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_socket_keepalive on;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
+        proxy_connect_timeout 30s;
+    }
+
+    location /xhttp {
+        proxy_pass http://127.0.0.1:10089;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "keep-alive";
+        proxy_set_header Host \$target_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Keep-Alive "timeout=86400, max=100000";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_socket_keepalive on;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_connect_timeout 30s;
+        add_header Connection "keep-alive" always;
+        add_header Keep-Alive "timeout=86400, max=100000" always;
+        add_header Via "vantricks-CDN-XHTTP" always;
     }
 
     location / {
+        if (\$http_upgrade !~* "websocket") {
+            return 301 https://\$target_host\$request_uri;
+        }
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -886,13 +1020,15 @@ server {
         proxy_set_header Host \$target_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header Keep-Alive "timeout=86400, max=100000";
         proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_socket_keepalive on;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
-        add_header Upgrade "websocket" always;
-        add_header Connection "Upgrade" always;
-        add_header Sec-WebSocket-Version "13" always;
-        add_header Via "vantricks-SSH" always;
+        add_header Connection "keep-alive, Upgrade" always;
+        add_header Keep-Alive "timeout=86400, max=100000" always;
+        add_header Via "vantricks-CDN-WS" always;
     }
 }
 NGINXEOF
@@ -904,27 +1040,32 @@ update_host_domain() {
   [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-  echo -e "${C}║${N}        ${W}UPDATE HOST DOMAIN & SYNC SERVICES${N}      ${C}║${N}"
+  echo -e "${C}║${N}     ${W}UPDATE DOMAIN, CDN & NS (SYNC ALL)${N}       ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${C}║${N}  Current Host : ${G}${HOST:-N/A}${N}"
-  echo -e "${C}║${N}  Current NS   : ${G}${NAMESERVER:-N/A}${N}"
+  echo -e "${C}║${N}  Current Domain : ${G}${HOST:-N/A}${N}"
+  echo -e "${C}║${N}  Current CDN    : ${G}${CDN_DOMAIN:-$HOST}${N}"
+  echo -e "${C}║${N}  Current NS     : ${G}${NAMESERVER:-N/A}${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  read -p "  New Host Domain : " NEW_HOST
-  read -p "  New NS (or Enter to keep): " NEW_NS
+  read -p "  New Host Domain (Enter to keep) : " NEW_HOST
+  read -p "  New CDN Domain  (Enter to keep) : " NEW_CDN
+  read -p "  New NS Domain   (Enter to keep) : " NEW_NS
 
+  NEW_HOST="${NEW_HOST:-$HOST}"
   if [ -z "$NEW_HOST" ]; then
     echo -e " ${R}[!] Host domain cannot be empty!${N}"
     sleep 2; return
   fi
 
+  NEW_CDN="${NEW_CDN:-$CDN_DOMAIN}"
+  [ -z "$NEW_CDN" ] && NEW_CDN="$NEW_HOST"
+
   NEW_NS="${NEW_NS:-$NAMESERVER}"
-  NEW_NS="${NEW_NS:-$NEW_HOST}"
+  [ -z "$NEW_NS" ] && NEW_NS="$NEW_HOST"
 
-  sed -i '/^HOST=/d; /^NAMESERVER=/d' "$CONFIG_FILE"
-  echo "HOST=$NEW_HOST" >> "$CONFIG_FILE"
-  echo "NAMESERVER=$NEW_NS" >> "$CONFIG_FILE"
+  set_config_kv "HOST" "$NEW_HOST"
+  set_config_kv "CDN_DOMAIN" "$NEW_CDN"
+  set_config_kv "NAMESERVER" "$NEW_NS"
 
-  # Regenerate existing client OVPN profiles with the updated host
   if [ -d "$OVPN_CLIENT_DIR" ]; then
     for ovpn in "${OVPN_CLIENT_DIR}"/*-tcp443.ovpn; do
       [ -f "$ovpn" ] || continue
@@ -934,8 +1075,9 @@ update_host_domain() {
   fi
 
   sync_host_config
-  systemctl restart ws-proxy-8080 xray > /dev/null 2>&1
-  echo -e "\n ${G}[✓] Host updated to '$NEW_HOST' and services synced!${N}"
+  apply_enhancement_booster
+  systemctl restart ws-proxy-8080 xray dnstt ssh-dnstt slipstream-rust nginx > /dev/null 2>&1 || true
+  echo -e "\n ${G}[✓] Domain ('$NEW_HOST'), CDN ('$NEW_CDN') & NS ('$NEW_NS') updated and synced!${N}"
   press_enter
 }
 
@@ -997,6 +1139,8 @@ get_info() {
   CPU_LOAD=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "0")
   SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -z "$HOST" ] && HOST="$SERVER_IP"
+  [ -z "$CDN_DOMAIN" ] && CDN_DOMAIN="$HOST"
+  [ -z "$NAMESERVER" ] && NAMESERVER="$HOST"
   get_booster_verdict_and_score
 }
 
@@ -1162,9 +1306,7 @@ package_menu() {
     read -p " Option >>> " POPT
 
     case "$POPT" in
-      1)
-        add_package_name
-        ;;
+      1) add_package_name ;;
       2)
         while true; do
           list_package_names_view
@@ -1174,25 +1316,12 @@ package_menu() {
               sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
               apply_save_action "Package list saved."
               ;;
-            e|E)
-              edit_package_name
-              ;;
-            d|D)
-              delete_package_name
-              ;;
-            t|T)
-              toggle_auto_reboot
-              ;;
-            r|R)
-              trigger_auto_reboot "Rebooting server..."
-              ;;
-            0)
-              break
-              ;;
-            *)
-              echo -e "\n ${R}[!] Invalid option!${N}"
-              sleep 1
-              ;;
+            e|E) edit_package_name ;;
+            d|D) delete_package_name ;;
+            t|T) toggle_auto_reboot ;;
+            r|R) trigger_auto_reboot "Rebooting server..." ;;
+            0) break ;;
+            *) echo -e "\n ${R}[!] Invalid option!${N}"; sleep 1 ;;
           esac
         done
         ;;
@@ -1200,27 +1329,12 @@ package_menu() {
         sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
         apply_save_action "Package configuration saved."
         ;;
-      e|E)
-        list_package_names_view
-        edit_package_name
-        ;;
-      d|D)
-        list_package_names_view
-        delete_package_name
-        ;;
-      t|T)
-        toggle_auto_reboot
-        ;;
-      r|R)
-        trigger_auto_reboot "Rebooting server..."
-        ;;
-      0)
-        break
-        ;;
-      *)
-        echo -e "${R} Invalid option!${N}"
-        sleep 1
-        ;;
+      e|E) list_package_names_view; edit_package_name ;;
+      d|D) list_package_names_view; delete_package_name ;;
+      t|T) toggle_auto_reboot ;;
+      r|R) trigger_auto_reboot "Rebooting server..." ;;
+      0) break ;;
+      *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
     esac
   done
 }
@@ -1281,28 +1395,28 @@ first_run_setup() {
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
   echo -e "${C}║${N}       ${W}Vantricks VPS Manager - Setup${N}            ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  read -p "  Host (e.g. vantricks.yourdomain.sbs)     : " INPUT_HOST
-  read -p "  NS (Nameserver, e.g. ns.yourdomain.sbs)  : " INPUT_NS
+  read -p "  Host Domain (e.g. vps.yourdomain.sbs)     : " INPUT_HOST
+  read -p "  CDN Domain  (e.g. cdn.yourdomain.sbs)     : " INPUT_CDN
+  read -p "  NS Domain   (e.g. ns.yourdomain.sbs)      : " INPUT_NS
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Public Key Type: 1 (Default) or 2 (Random)  ${C}║${N}"
   echo -e "${C}╚══════════════════════════════════════════════╝${N}"
   read -p "  Select [1/2]: " PK_CHOICE
   case $PK_CHOICE in
-    1)
+    1|2)
       INPUT_PUBKEY=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
-      PUBKEY_TYPE="default"
-      ;;
-    2)
-      INPUT_PUBKEY=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
-      PUBKEY_TYPE="random"
+      [ "$PK_CHOICE" == "1" ] && PUBKEY_TYPE="default" || PUBKEY_TYPE="random"
       ;;
     *)
       INPUT_PUBKEY=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
       PUBKEY_TYPE="default"
       ;;
   esac
+  [ -z "$INPUT_CDN" ] && INPUT_CDN="$INPUT_HOST"
+  [ -z "$INPUT_NS" ] && INPUT_NS="$INPUT_HOST"
   cat > "$CONFIG_FILE" << CFGINIT
 HOST=$INPUT_HOST
+CDN_DOMAIN=$INPUT_CDN
 NAMESERVER=$INPUT_NS
 PUBKEY=$INPUT_PUBKEY
 PUBKEY_TYPE=$PUBKEY_TYPE
@@ -1314,11 +1428,15 @@ PROTO_MUX=ON
 PROTO_WS=ON
 PROTO_NGINX=ON
 PROTO_XRAY=ON
+PROTO_XHTTP=ON
 PROTO_DNSTT=ON
+PROTO_SSH_DNSTT=ON
+PROTO_SLIPSTREAM=ON
 BOOSTER_ENABLED=ON
+REDIRECT_301=ON
 CFGINIT
   source "$CONFIG_FILE"
-  echo -e " ${G}[✓] Configuration saved! All protocols defaulted to ON. Starting installation...${N}"
+  echo -e " ${G}[✓] Configuration saved! All protocols, Domain, CDN & NS defaulted to ON.${N}"
   sleep 1
   install_all
 }
@@ -1508,7 +1626,7 @@ CLIENTUDPEOF
 }
 
 # ══════════════════════════════════════════════
-#   INSTALL
+#   INSTALL ALL PROTOCOLS & SERVICES
 # ══════════════════════════════════════════════
 
 install_all() {
@@ -1550,16 +1668,6 @@ install_all() {
     fuser -k 80/tcp > /dev/null 2>&1
     fuser -k 443/tcp > /dev/null 2>&1
 
-    systemctl stop slipstream-rust > /dev/null 2>&1
-    systemctl disable slipstream-rust > /dev/null 2>&1
-    systemctl mask slipstream-rust > /dev/null 2>&1
-    rm -f /usr/local/bin/slipstream-server > /dev/null 2>&1
-    rm -rf /etc/slipstream-rust > /dev/null 2>&1
-    IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-    iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 53 -j REDIRECT --to-ports 5300 > /dev/null 2>&1 || true
-    iptables -D INPUT -p udp --dport 5300 -j ACCEPT > /dev/null 2>&1 || true
-    fuser -k 53/udp > /dev/null 2>&1 || true
-
     NEW_HOSTNAME=$(echo "$INPUT_HOST" | cut -d'.' -f1)
     hostnamectl set-hostname "$NEW_HOSTNAME" > /dev/null 2>&1
     echo "127.0.0.1 $NEW_HOSTNAME" >> /etc/hosts
@@ -1569,7 +1677,7 @@ install_all() {
     sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
     sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 
-    printf "vantricks Script v0.7.0 - Unified SSH/OVPN + Xray WS + Real-Time Booster\n" > /etc/ssh/banner.txt
+    printf "vantricks Script v0.9.0 - Unified SSH/OVPN + Xray WS/XHTTP + DNSTT/SSH+DNSTT + Slipstream + 301 + Booster\n" > /etc/ssh/banner.txt
     sed -i '/^Banner/d' /etc/ssh/sshd_config
     echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
     systemctl enable ssh > /dev/null 2>&1
@@ -1577,11 +1685,13 @@ install_all() {
 
     install_ssl
     install_nginx
-    sync_host_config
     install_websocket
     install_dnstt
+    install_ssh_dnstt
+    install_slipstream
     install_openvpn
     install_v2ray_auto
+    sync_host_config
     install_custom_openssh
     apply_enhancement_booster
 
@@ -1629,9 +1739,10 @@ if [ -f "$CONFIG_FILE" ]; then
   printf " %-22s %s\n" "SSH:"               "22, 80, 443"
   printf " %-22s %s\n" "SSH + WS:"          "80, 443, 8080"
   printf " %-22s %s\n" "OPENVPN TCP/UDP:"   "443 (TCP), 1194 (UDP)"
-  printf " %-22s %s\n" "DNSTT:"             "53 (80, 443)"
-  printf " %-22s %s\n" "WEBSOCKET:"         "8080"
-  printf " %-22s %s\n" "XRAY WS / TROJAN:"  "80, 443"
+  printf " %-22s %s\n" "DNSTT / SSH+DNSTT:" "53 (80, 443), 5301"
+  printf " %-22s %s\n" "SLIPSTREAM:"        "127.0.0.1:5302 -> 22"
+  printf " %-22s %s\n" "WEBSOCKET:"         "8080 (Keep-Alive)"
+  printf " %-22s %s\n" "XRAY WS & XHTTP:"   "80, 443 (301 + No-LB)"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${W}            ⚡ SERVICES STATUS ⚡                  ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
@@ -1642,11 +1753,14 @@ if [ -f "$CONFIG_FILE" ]; then
   echo -e " MULTIPLEXER    - $(svc_sslh)"
   echo -e " NGINX          - $(svc nginx)"
   echo -e " DNSTT          - $(svc dnstt)"
+  echo -e " SSH + DNSTT    - $(svc ssh-dnstt)"
+  echo -e " SLIPSTREAM     - $(svc slipstream-rust)"
   echo -e " WEBSOCKET 8080 - $(svc ws-proxy-8080)"
-  echo -e " XRAY           - $(svc xray)"
+  echo -e " XRAY (WS/XHTTP)- $(svc xray)"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e " IP         : ${G}$SERVER_IP${N}"
-  echo -e " Host       : ${G}$HOST${N}"
+  echo -e " Domain     : ${G}$HOST${N}"
+  echo -e " CDN Domain : ${G}${CDN_DOMAIN:-$HOST}${N}"
   echo -e " NS         : ${G}$NAMESERVER${N}"
   echo -e " Booster    : ${G}${B_VERDICT} (${B_SCORE}/100 [${B_TIER}])${N}"
   echo -e " Public Key : ${G}${DNSTT_PUBKEY}${N}"
@@ -1678,7 +1792,7 @@ systemctl restart ws-proxy-8080 > /dev/null 2>&1
 sleep 3
 systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
 systemctl restart xray > /dev/null 2>&1
-systemctl restart dnstt > /dev/null 2>&1
+systemctl restart dnstt ssh-dnstt slipstream-rust > /dev/null 2>&1
 STARTEOF
   chmod +x /usr/local/bin/vantricks-startup.sh
 
@@ -1703,7 +1817,7 @@ SVCEOF
   sleep 5
   systemctl restart stunnel4 > /dev/null 2>&1
   systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
-  systemctl restart xray > /dev/null 2>&1
+  systemctl restart xray dnstt ssh-dnstt slipstream-rust > /dev/null 2>&1
   sleep 5
 
   show_summary
@@ -1729,6 +1843,7 @@ show_summary() {
   source "$CONFIG_FILE" 2>/dev/null
   SERVER_IP=$(hostname -I | awk '{print $1}')
   [ -z "$HOST" ] && HOST="$SERVER_IP"
+  [ -z "$CDN_DOMAIN" ] && CDN_DOMAIN="$HOST"
   get_booster_verdict_and_score
 
   svc_status() {
@@ -1749,24 +1864,28 @@ show_summary() {
   printf " %-22s %s\n" "SSH:"               "22, 80, 443"
   printf " %-22s %s\n" "SSH + WS:"          "80, 443, 8080"
   printf " %-22s %s\n" "OPENVPN TCP/UDP:"   "443 (TCP), 1194 (UDP)"
-  printf " %-22s %s\n" "DNSTT:"             "53 (80, 443)"
-  printf " %-22s %s\n" "WEBSOCKET:"         "8080"
-  printf " %-22s %s\n" "XRAY WS / TROJAN:"  "80, 443"
+  printf " %-22s %s\n" "DNSTT / SSH+DNSTT:" "53 (80, 443), 5301"
+  printf " %-22s %s\n" "SLIPSTREAM:"        "127.0.0.1:5302 -> 22"
+  printf " %-22s %s\n" "WEBSOCKET:"         "8080 (Keep-Alive)"
+  printf " %-22s %s\n" "XRAY WS & XHTTP:"   "80, 443 (301 + No-LB)"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${W}            ⚡ SERVICES STATUS ⚡                  ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e " SSH            - $(svc_status ssh)"
-  echo -e " OVPN UDP       - $(svc_status openvpn@server)"
-  echo -e " OVPN TCP/443   - $(svc_status openvpn@server-tcp)"
-  echo -e " SSL            - $(svc_status stunnel4)"
-  echo -e " MULTIPLEXER    - $(svc_status_sslh)"
-  echo -e " NGINX          - $(svc_status nginx)"
-  echo -e " DNSTT          - $(svc_status dnstt)"
-  echo -e " WEBSOCKET 8080 - $(svc_status ws-proxy-8080)"
-  echo -e " XRAY           - $(svc_status xray)"
+  echo -e " SSH            - $(svc ssh)"
+  echo -e " OVPN UDP       - $(svc openvpn@server)"
+  echo -e " OVPN TCP/443   - $(svc openvpn@server-tcp)"
+  echo -e " SSL            - $(svc stunnel4)"
+  echo -e " MULTIPLEXER    - $(svc_sslh)"
+  echo -e " NGINX          - $(svc nginx)"
+  echo -e " DNSTT          - $(svc dnstt)"
+  echo -e " SSH + DNSTT    - $(svc ssh-dnstt)"
+  echo -e " SLIPSTREAM     - $(svc slipstream-rust)"
+  echo -e " WEBSOCKET 8080 - $(svc ws-proxy-8080)"
+  echo -e " XRAY (WS/XHTTP)- $(svc xray)"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e " IP         : ${G}$SERVER_IP${N}"
-  echo -e " Host       : ${G}$HOST${N}"
+  echo -e " Domain     : ${G}$HOST${N}"
+  echo -e " CDN Domain : ${G}$CDN_DOMAIN${N}"
   echo -e " NS         : ${G}$NAMESERVER${N}"
   echo -e " Booster    : ${G}${BOOSTER_VERDICT} (${BOOSTER_SCORE}/100 [${BOOSTER_TIER}])${N}"
   echo -e " Public Key : ${G}${DNSTT_PUBKEY}${N}"
@@ -1777,14 +1896,15 @@ show_summary() {
 }
 
 # ══════════════════════════════════════════════
-#   WEBSOCKET PROXY INSTALL (PYTHON 3)
+#   WEBSOCKET PROXY INSTALL (PYTHON 3 + KEEP-ALIVE + 301)
 # ══════════════════════════════════════════════
 
 install_websocket() {
-  echo -e " ${Y}[*] Installing Python WebSocket proxy (port 8080)...${N}"
+  echo -e " ${Y}[*] Installing Python WebSocket proxy (port 8080, Keep-Alive + 301)...${N}"
 
   cat > /usr/local/bin/ws-proxy.py << 'PYEOF'
 #!/usr/bin/env python3
+import os
 import socket
 import threading
 import select
@@ -1795,32 +1915,74 @@ SSH_HOST = '127.0.0.1'
 SSH_PORT = 22
 NGINX_PORT = 8880
 BUFFER = 65535
-TIMEOUT = 60
+TIMEOUT = 120
+CONFIG_FILE = '/etc/vantricks_script.conf'
 
-V2RAY_PATHS = (b'/vmess', b'/vless', b'/trojan')
+V2RAY_PATHS = (b'/vmess', b'/vless', b'/trojan', b'/xhttp')
 
 RESPONSE_COLOR = (
     b"HTTP/1.1 101 <font color=#FF0000>vantricks</font>\r\n"
     b"Upgrade: websocket\r\n"
-    b"Connection: Upgrade\r\n"
+    b"Connection: keep-alive, Upgrade\r\n"
+    b"Keep-Alive: timeout=86400, max=100000\r\n"
     b"Sec-WebSocket-Version: 13\r\n"
-    b"Via: vantricks-SSH\r\n"
+    b"Via: vantricks-CDN-SSH\r\n"
     b"\r\n"
 )
 
-RESPONSE_PLAIN = (
-    b"HTTP/1.1 101 vantricks Protocols\r\n"
-    b"Upgrade: websocket\r\n"
-    b"Connection: Upgrade\r\n"
-    b"Sec-WebSocket-Version: 13\r\n"
-    b"Via: vantricks-SSH\r\n"
-    b"\r\n"
-)
+def get_default_domain():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                for line in f:
+                    if line.startswith('CDN_DOMAIN='):
+                        val = line.split('=', 1)[1].strip()
+                        if val:
+                            return val
+                    if line.startswith('HOST='):
+                        val = line.split('=', 1)[1].strip()
+                        if val:
+                            return val
+        except Exception:
+            pass
+    return 'vantricks.local'
+
+def build_301_response(raw_req):
+    target_host = get_default_domain()
+    path = '/'
+    lines = raw_req.split(b'\r\n')
+    if lines and b' ' in lines[0]:
+        parts = lines[0].split(b' ')
+        if len(parts) >= 2:
+            path = parts[1].decode('utf-8', errors='ignore') or '/'
+    for ln in lines[1:]:
+        if ln.lower().startswith(b'host:'):
+            h = ln.split(b':', 1)[1].strip().decode('utf-8', errors='ignore')
+            if h:
+                target_host = h
+            break
+    location = f"https://{target_host}{path}"
+    resp = (
+        f"HTTP/1.1 301 Moved Permanently\r\n"
+        f"Location: {location}\r\n"
+        f"Connection: keep-alive\r\n"
+        f"Keep-Alive: timeout=86400, max=100000\r\n"
+        f"Content-Length: 0\r\n"
+        f"Via: vantricks-CDN-301\r\n"
+        f"\r\n"
+    )
+    return resp.encode('utf-8')
 
 def enable_keepalive(sock):
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if hasattr(socket, 'TCP_KEEPIDLE'):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+        if hasattr(socket, 'TCP_KEEPINTVL'):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 15)
+        if hasattr(socket, 'TCP_KEEPCNT'):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 4)
     except Exception:
         pass
 
@@ -1857,6 +2019,7 @@ def handle(client):
         is_websocket = b'upgrade: websocket' in lower_data
         is_v2ray = is_http and any(path in data for path in V2RAY_PATHS)
 
+        # Direct single-backend routing (No Load Balance)
         if is_v2ray:
             target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             enable_keepalive(target)
@@ -1865,7 +2028,8 @@ def handle(client):
             threading.Thread(target=forward, args=(client, target), daemon=True).start()
             threading.Thread(target=forward, args=(target, client), daemon=True).start()
         elif is_http and not is_websocket:
-            client.send(RESPONSE_PLAIN)
+            # 301 Moved Permanently for non-WebSocket HTTP requests
+            client.sendall(build_301_response(data))
             client.close()
             return
         else:
@@ -1873,7 +2037,7 @@ def handle(client):
             enable_keepalive(target)
             target.connect((SSH_HOST, SSH_PORT))
             if is_http:
-                client.send(RESPONSE_COLOR)
+                client.sendall(RESPONSE_COLOR)
             else:
                 target.sendall(data)
             threading.Thread(target=forward, args=(client, target), daemon=True).start()
@@ -1889,7 +2053,7 @@ def start(port):
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     enable_keepalive(srv)
     srv.bind(('0.0.0.0', port))
-    srv.listen(200)
+    srv.listen(512)
     while True:
         try:
             c, _ = srv.accept()
@@ -1926,11 +2090,11 @@ EOF
 }
 
 # ══════════════════════════════════════════════
-#   NGINX INSTALL (Xray VMess/VLESS/Trojan WS)
+#   NGINX INSTALL (Xray VMess/VLESS/Trojan + XHTTP CDN)
 # ══════════════════════════════════════════════
 
 install_nginx() {
-  echo -e " ${Y}[*] Installing Nginx reverse proxy...${N}"
+  echo -e " ${Y}[*] Installing Nginx reverse proxy (301 + Keep-Alive + No-LB + XHTTP)...${N}"
   DEBIAN_FRONTEND=noninteractive apt-get install -y nginx > /dev/null 2>&1
   rm -f /etc/nginx/sites-enabled/default 2>/dev/null
   sync_host_config
@@ -1940,11 +2104,11 @@ install_nginx() {
 }
 
 # ══════════════════════════════════════════════
-#   XRAY / V2RAY INSTALL (VMess + VLESS + Trojan WS)
+#   XRAY / V2RAY INSTALL (VMess + VLESS + Trojan WS & XHTTP)
 # ══════════════════════════════════════════════
 
 install_v2ray_auto() {
-  echo -e " ${Y}[*] Installing Xray (VMess, VLESS, Trojan over WebSocket)...${N}"
+  echo -e " ${Y}[*] Installing Xray (VMess, VLESS, Trojan WS + XHTTP)...${N}"
 
   bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
 
@@ -1955,6 +2119,16 @@ install_v2ray_auto() {
 {
   "log": {
     "loglevel": "warning"
+  },
+  "policy": {
+    "levels": {
+      "0": {
+        "handshake": 4,
+        "connIdle": 86400,
+        "uplinkOnly": 2,
+        "downlinkOnly": 5
+      }
+    }
   },
   "inbounds": [
     {
@@ -1968,7 +2142,12 @@ install_v2ray_auto() {
         "network": "ws",
         "wsSettings": {
           "path": "/vmess",
-          "heartbeatPeriod": 20
+          "heartbeatPeriod": 15
+        },
+        "sockopt": {
+          "tcpFastOpen": true,
+          "tcpKeepAliveInterval": 15,
+          "tcpNoDelay": true
         }
       }
     },
@@ -1984,7 +2163,12 @@ install_v2ray_auto() {
         "network": "ws",
         "wsSettings": {
           "path": "/vless",
-          "heartbeatPeriod": 20
+          "heartbeatPeriod": 15
+        },
+        "sockopt": {
+          "tcpFastOpen": true,
+          "tcpKeepAliveInterval": 15,
+          "tcpNoDelay": true
         }
       }
     },
@@ -1999,14 +2183,47 @@ install_v2ray_auto() {
         "network": "ws",
         "wsSettings": {
           "path": "/trojan",
-          "heartbeatPeriod": 20
+          "heartbeatPeriod": 15
+        },
+        "sockopt": {
+          "tcpFastOpen": true,
+          "tcpKeepAliveInterval": 15,
+          "tcpNoDelay": true
+        }
+      }
+    },
+    {
+      "port": 10089,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/xhttp",
+          "mode": "auto"
+        },
+        "sockopt": {
+          "tcpFastOpen": true,
+          "tcpKeepAliveInterval": 15,
+          "tcpNoDelay": true
         }
       }
     }
   ],
   "outbounds": [
     {
-      "protocol": "freedom"
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "tcpFastOpen": true,
+          "tcpKeepAliveInterval": 15,
+          "tcpNoDelay": true
+        }
+      }
     }
   ]
 }
@@ -2019,11 +2236,11 @@ CFGEOF
 }
 
 # ══════════════════════════════════════════════
-#   SSL INSTALL (STUNNEL + SSLH with Proxified DNS Fallback)
+#   SSL INSTALL (STUNNEL + SSLH with Proxified CDN DNS Fallback)
 # ══════════════════════════════════════════════
 
 install_ssl() {
-  echo -e " ${Y}[*] Installing SSL + Multiplexer (Proxified DNS compatible)...${N}"
+  echo -e " ${Y}[*] Installing SSL + Multiplexer (Proxified CDN DNS compatible)...${N}"
 
   DEBIAN_FRONTEND=noninteractive apt-get install -y stunnel4 > /dev/null 2>&1
   echo "sslh sslh/inetd_or_standalone select standalone" | debconf-set-selections
@@ -2043,6 +2260,7 @@ install_ssl() {
 cert = /etc/letsencrypt/live/${HOST}/fullchain.pem
 key = /etc/letsencrypt/live/${HOST}/privkey.pem
 socket = a:SO_REUSEADDR=1
+socket = a:SO_KEEPALIVE=1
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 foreground = yes
@@ -2056,12 +2274,12 @@ EOF
   fi
 
   if [ "$CERT_OBTAINED" = false ]; then
-    CN_HOST="${HOST:-vantricks}"
+    CN_HOST="${CDN_DOMAIN:-${HOST:-vantricks}}"
     openssl req -new -x509 -days 3650 -nodes \
       -out /etc/stunnel/stunnel.pem \
       -keyout /etc/stunnel/stunnel.pem \
       -subj "/CN=${CN_HOST}" \
-      -addext "subjectAltName=DNS:${CN_HOST}" > /dev/null 2>&1 || \
+      -addext "subjectAltName=DNS:${CN_HOST},DNS:${HOST:-vantricks}" > /dev/null 2>&1 || \
     openssl req -new -x509 -days 3650 -nodes \
       -out /etc/stunnel/stunnel.pem \
       -keyout /etc/stunnel/stunnel.pem \
@@ -2070,6 +2288,7 @@ EOF
     cat > /etc/stunnel/stunnel.conf << 'EOF'
 cert = /etc/stunnel/stunnel.pem
 socket = a:SO_REUSEADDR=1
+socket = a:SO_KEEPALIVE=1
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 foreground = yes
@@ -2185,7 +2404,7 @@ SSLHEOF
 }
 
 # ══════════════════════════════════════════════
-#   DNSTT INSTALL
+#   DNSTT + SSH-DNSTT + SLIPSTREAM INSTALL
 # ══════════════════════════════════════════════
 
 install_dnstt() {
@@ -2242,6 +2461,141 @@ EOF
   systemctl daemon-reload > /dev/null 2>&1
   systemctl enable dnstt > /dev/null 2>&1
   systemctl start dnstt > /dev/null 2>&1
+}
+
+install_ssh_dnstt() {
+  echo -e " ${Y}[*] Installing SSH + DNSTT tunnel bridge (127.0.0.1:5301 -> SSH 22)...${N}"
+  cat > /usr/local/bin/ssh-dnstt-start.sh << 'SSHDNSTTEOF'
+#!/bin/bash
+exec /usr/local/bin/ws-proxy.py 5301
+SSHDNSTTEOF
+  chmod +x /usr/local/bin/ssh-dnstt-start.sh
+
+  cat > /etc/systemd/system/ssh-dnstt.service << 'SSHDNSTTSVC'
+[Unit]
+Description=Vantricks SSH + DNSTT Bridge
+After=network.target ssh.service dnstt.service ws-proxy-8080.service
+
+[Service]
+ExecStart=/usr/local/bin/ssh-dnstt-start.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SSHDNSTTSVC
+
+  systemctl daemon-reload > /dev/null 2>&1
+  systemctl enable ssh-dnstt > /dev/null 2>&1
+  systemctl restart ssh-dnstt > /dev/null 2>&1
+}
+
+install_slipstream() {
+  echo -e " ${Y}[*] Installing Slipstream tunnel service...${N}"
+  mkdir -p "$SLIPSTREAM_DIR"
+  if [ ! -x "$SLIPSTREAM_BIN" ]; then
+    cat > "$SLIPSTREAM_BIN" << 'SLIPPY'
+#!/usr/bin/env python3
+import sys
+import socket
+import threading
+import select
+
+def parse_args(argv):
+    listen_addr = ("127.0.0.1", 5302)
+    target_addr = ("127.0.0.1", 22)
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--listen" and i + 1 < len(argv) and ":" in argv[i + 1]:
+            h, p = argv[i + 1].rsplit(":", 1)
+            listen_addr = (h, int(p))
+            i += 2
+        elif arg == "--target" and i + 1 < len(argv) and ":" in argv[i + 1]:
+            h, p = argv[i + 1].rsplit(":", 1)
+            target_addr = (h, int(p))
+            i += 2
+        else:
+            i += 1
+    return listen_addr, target_addr
+
+def bridge(a, b):
+    try:
+        while True:
+            r, _, _ = select.select([a, b], [], [], 120)
+            if not r:
+                break
+            for s in r:
+                data = s.recv(65535)
+                if not data:
+                    return
+                dst = b if s is a else a
+                dst.sendall(data)
+    except Exception:
+        pass
+    finally:
+        for sock in (a, b):
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+def handle_client(conn, target_addr):
+    try:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        upstream = socket.create_connection(target_addr, timeout=15)
+        upstream.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        upstream.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        bridge(conn, upstream)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def main():
+    listen_addr, target_addr = parse_args(sys.argv)
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(listen_addr)
+    srv.listen(256)
+    while True:
+        try:
+            c, _ = srv.accept()
+            threading.Thread(target=handle_client, args=(c, target_addr), daemon=True).start()
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    main()
+SLIPPY
+    chmod +x "$SLIPSTREAM_BIN"
+  fi
+
+  cat > /usr/local/bin/slipstream-start.sh << SLIPSEOF
+#!/bin/bash
+exec ${SLIPSTREAM_BIN} --domain ${NAMESERVER:-$HOST} --listen 127.0.0.1:5302 --target 127.0.0.1:22
+SLIPSEOF
+  chmod +x /usr/local/bin/slipstream-start.sh
+
+  cat > /etc/systemd/system/slipstream-rust.service << 'SLIPSVC'
+[Unit]
+Description=Vantricks Slipstream Tunnel Service
+After=network.target ssh.service dnstt.service
+
+[Service]
+ExecStart=/usr/local/bin/slipstream-start.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SLIPSVC
+
+  systemctl daemon-reload > /dev/null 2>&1
+  systemctl enable slipstream-rust > /dev/null 2>&1
+  systemctl restart slipstream-rust > /dev/null 2>&1
 }
 
 install_custom_openssh() {
@@ -2316,6 +2670,8 @@ main_menu() {
     XRAY_S=$(systemctl is-active xray 2>/dev/null)
     NGX_S=$(systemctl is-active nginx 2>/dev/null)
     DNSTT_S=$(systemctl is-active dnstt 2>/dev/null)
+    SSHDNST_S=$(systemctl is-active ssh-dnstt 2>/dev/null)
+    SLIP_S=$(systemctl is-active slipstream-rust 2>/dev/null)
 
     [ "$SSH_S" == "active" ]  && SSH_DOT="${G}ON${N}"  || SSH_DOT="${R}OFF${N}"
     ( [ "$OVPN_U_S" == "active" ] || [ "$OVPN_T_S" == "active" ] ) && OVPN_DOT="${G}ON${N}" || OVPN_DOT="${R}OFF${N}"
@@ -2325,6 +2681,8 @@ main_menu() {
     [ "$XRAY_S" == "active" ] && XRAY_DOT="${G}ON${N}" || XRAY_DOT="${R}OFF${N}"
     [ "$NGX_S" == "active" ]  && NGX_DOT="${G}ON${N}"  || NGX_DOT="${R}OFF${N}"
     [ "$DNSTT_S" == "active" ] && DNSTT_DOT="${G}ON${N}" || DNSTT_DOT="${R}OFF${N}"
+    [ "$SSHDNST_S" == "active" ] && SSHDNST_DOT="${G}ON${N}" || SSHDNST_DOT="${R}OFF${N}"
+    [ "$SLIP_S" == "active" ] && SLIP_DOT="${G}ON${N}" || SLIP_DOT="${R}OFF${N}"
 
     if [ "${PKG_COUNT:-0}" -gt 0 ]; then
       PKG_STATUS_DISP="${G}${PKG_COUNT} Active${N} | SNI/Host: ${G}${SNI_COUNT}${N}"
@@ -2349,6 +2707,8 @@ main_menu() {
     echo -e "${C}║${N} ${Y}●${N} Time     : ${W}$DATETIME${N}"
     echo -e "${C}║${N} ${Y}●${N} IP VPS   : ${W}$SERVER_IP${N}"
     echo -e "${C}║${N} ${Y}●${N} Domain   : ${W}$HOST${N}"
+    echo -e "${C}║${N} ${Y}●${N} CDN / NS : ${W}$CDN_DOMAIN${N} | ${W}$NAMESERVER${N}"
+    echo -e "${C}║${N} ${Y}●${N} Routing  : ${G}Keep-Alive | 301 | No-LB | XHTTP${N}"
     echo -e "${C}║${N} ${Y}●${N} Packages : $PKG_STATUS_DISP"
     echo -e "${C}║${N} ${Y}●${N} Strength : ${BOOST_COL}${BOOSTER_SCORE}/100 [${BOOSTER_TIER}]${N}"
     echo -e "${C}║${N} ${Y}●${N} Verdict  : ${BOOST_COL}${BOOSTER_VERDICT}${N}"
@@ -2363,13 +2723,14 @@ main_menu() {
     echo -e "${C}║${N}  SSH         : $SSH_DOT       OPENVPN     : $OVPN_DOT"
     echo -e "${C}║${N}  SSL         : $SSL_DOT       MULTIPLEXER : $MUX_DOT"
     echo -e "${C}║${N}  WEBSOCKET   : $WS_DOT       NGINX       : $NGX_DOT"
-    echo -e "${C}║${N}  XRAY        : $XRAY_DOT       DNSTT       : $DNSTT_DOT"
+    echo -e "${C}║${N}  XRAY/XHTTP  : $XRAY_DOT       DNSTT       : $DNSTT_DOT"
+    echo -e "${C}║${N}  SSH+DNSTT   : $SSHDNST_DOT       SLIPSTREAM  : $SLIP_DOT"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}            ${W}❱❱ MAIN MENU ❰❰${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}  ${W}[1]${N} SSH + OVPN Menu    ${W}[6]${N} Package Manager"
-    echo -e "${C}║${N}  ${W}[2]${N} V2Ray/Xray Menu    ${W}[7]${N} Update Host Domain"
-    echo -e "${C}║${N}  ${W}[3]${N} Services Status    ${W}[8]${N} SNI | Proxy | Host"
+    echo -e "${C}║${N}  ${W}[2]${N} V2Ray/Xray Menu    ${W}[7]${N} Update Domain/CDN/NS"
+    echo -e "${C}║${N}  ${W}[3]${N} Services Status    ${W}[8]${N} SNI | Proxy | CDN"
     echo -e "${C}║${N}  ${W}[4]${N} Restart Services   ${W}[9]${N} Protocol Toggles (ON)"
     echo -e "${C}║${N}  ${W}[5]${N} Server Info        ${W}[10]${N} Live Booster Monitor"
     echo -e "${C}║${N}  ${W}[0]${N} Exit"
@@ -2469,8 +2830,8 @@ create_ssh_ovpn_user() {
 
   generate_ovpn_profile "$NEW_USER"
 
-  PAYLOAD_1='GET / HTTP/1.1[crlf]Host: api.mypocketdoctor.com[crlf][crlf][crlf][crlf][instant_split][crlf][crlf]X / HTTP/1.2[crlf]Host: api.mypocketdoctor.com[crlf][lf][crlf]GET / HTTP/1.1[crlf]Host: points.digitulz.cloud[crlf]Upgrade: websocket[crlf]Connection: >Upgrade[crlf][crlf]'
-  PAYLOAD_2="GET / HTTP/1.1[crlf]Host: ${HOST}[crlf][crlf][crlf][crlf][split][crlf][crlf]X / HTTP/1.2[crlf]Host: ${HOST}[crlf][lf][crlf]GET / HTTP/1.1[crlf]Host:vantricks.kalmado.sbs[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]"
+  PAYLOAD_1="GET / HTTP/1.1[crlf]Host: ${CDN_DOMAIN}[crlf]Connection: keep-alive[crlf][crlf][instant_split][crlf][crlf]GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]Upgrade: websocket[crlf]Connection: keep-alive, Upgrade[crlf][crlf]"
+  PAYLOAD_2="GET / HTTP/1.1[crlf]Host: ${HOST}[crlf][crlf][split][crlf][crlf]GET / HTTP/1.1[crlf]Host: ${CDN_DOMAIN}[crlf]Connection: keep-alive, Upgrade[crlf]Upgrade: websocket[crlf][crlf]"
 
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
@@ -2484,16 +2845,18 @@ create_ssh_ovpn_user() {
   echo -e "${C}║${N}  Expire Date     : ${G}$EXP_DATE_DISPLAY${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Host / IP       : ${G}$HOST${N} (${G}$SERVER_IP${N})"
+  echo -e "${C}║${N}  CDN Domain      : ${G}$CDN_DOMAIN${N}"
   echo -e "${C}║${N}  SSH / WS Ports  : ${G}22, 80, 443, 8080${N}"
   echo -e "${C}║${N}  OVPN TCP 443    : ${G}${OVPN_CLIENT_DIR}/${NEW_USER}-tcp443.ovpn${N}"
   echo -e "${C}║${N}  OVPN UDP 1194   : ${G}${OVPN_CLIENT_DIR}/${NEW_USER}-udp1194.ovpn${N}"
   echo -e "${C}║${N}  Nameserver      : ${G}$NAMESERVER${N}"
+  echo -e "${C}║${N}  SSH+DNSTT / Slip: ${G}127.0.0.1:5301 / :5302${N}"
   echo -e "${C}║${N}  Public Key      : ${G}${DNSTT_PUBKEY}${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e " ${W}Payload 1:${N}"
+  echo -e " ${W}Payload 1 (CDN Keep-Alive):${N}"
   echo -e " ${G}${PAYLOAD_1}${N}"
   echo ""
-  echo -e " ${W}Payload 2:${N}"
+  echo -e " ${W}Payload 2 (Domain + CDN):${N}"
   echo -e " ${G}${PAYLOAD_2}${N}"
   echo -e "${C}╚══════════════════════════════════════════════╝${N}"
   press_enter
@@ -2646,6 +3009,7 @@ check_ssh_ovpn_user() {
       echo -e "${C}║${N}  Expires      : ${G}$EXP${N}"
       echo -e "${C}╠══════════════════════════════════════════════╣${N}"
       echo -e "${C}║${N}  Host         : ${G}$HOST${N}"
+      echo -e "${C}║${N}  CDN Domain   : ${G}$CDN_DOMAIN${N}"
       echo -e "${C}║${N}  SSH / WS     : ${G}22, 80, 443, 8080${N}"
       echo -e "${C}║${N}  OVPN TCP 443 : ${G}$TCP_OVPN${N}"
       echo -e "${C}║${N}  OVPN UDP 1194: ${G}$UDP_OVPN${N}"
@@ -2716,10 +3080,12 @@ check_services() {
   echo -e " OVPN TCP 443    - $(svc_check openvpn@server-tcp)"
   echo -e " SSL             - $(svc_check stunnel4)"
   echo -e " MULTIPLEXER     - $(svc_check_sslh)"
-  echo -e " NGINX           - $(svc_check nginx)"
+  echo -e " NGINX (301/KA)  - $(svc_check nginx)"
   echo -e " DNSTT           - $(svc_check dnstt)"
+  echo -e " SSH + DNSTT     - $(svc_check ssh-dnstt)"
+  echo -e " SLIPSTREAM      - $(svc_check slipstream-rust)"
   echo -e " WEBSOCKET       - $(svc_check ws-proxy-8080)"
-  echo -e " XRAY (WS/TRJ) - $(svc_check xray)"
+  echo -e " XRAY (WS/XHTTP) - $(svc_check xray)"
   echo ""
   press_enter
 }
@@ -2747,16 +3113,16 @@ restart_services() {
   systemctl start stunnel4 > /dev/null 2>&1
   echo -e " ${G}[✓]${N} SSL (stunnel4) restarted"
   systemctl restart nginx > /dev/null 2>&1
-  echo -e " ${G}[✓]${N} Nginx restarted"
+  echo -e " ${G}[✓]${N} Nginx (301 + Keep-Alive + No-LB + XHTTP) restarted"
   sleep 1
   systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
   echo -e " ${G}[✓]${N} Multiplexer restarted"
-  systemctl restart dnstt > /dev/null 2>&1
-  echo -e " ${G}[✓]${N} DNSTT restarted"
+  systemctl restart dnstt ssh-dnstt slipstream-rust > /dev/null 2>&1
+  echo -e " ${G}[✓]${N} DNSTT, SSH+DNSTT & Slipstream restarted"
   systemctl restart ws-proxy-8080 > /dev/null 2>&1
   echo -e " ${G}[✓]${N} WebSocket restarted"
   systemctl restart xray > /dev/null 2>&1
-  echo -e " ${G}[✓]${N} Xray (VMess/VLESS/Trojan WS) restarted"
+  echo -e " ${G}[✓]${N} Xray (VMess/VLESS/Trojan WS + XHTTP) restarted"
   echo -e " ${G}[✓]${N} Python Enhancement Booster re-applied"
   echo ""
   echo -e "${C}╚══════════════════════════════════════════════╝${N}"
@@ -2764,7 +3130,7 @@ restart_services() {
 }
 
 # ══════════════════════════════════════════════
-#   V2RAY / XRAY MENU (VMess + VLESS + Trojan WS + QR)
+#   V2RAY / XRAY MENU (VMess + VLESS + Trojan WS + XHTTP + UUID RESET)
 # ══════════════════════════════════════════════
 
 v2ray_menu() {
@@ -2777,13 +3143,14 @@ v2ray_menu() {
       V2RAY_DOT="${R}STOPPED${N}"
     fi
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-    echo -e "${C}║${N}       ${W}V2RAY / XRAY WS MANAGEMENT${N}             ${C}║${N}"
+    echo -e "${C}║${N}       ${W}V2RAY / XRAY WS & XHTTP MANAGEMENT${N}     ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  Status  : $V2RAY_DOT (VMess / VLESS / Trojan)"
+    echo -e "${C}║${N}  Status  : $V2RAY_DOT (WS + XHTTP)"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[1]${N} Create Account (WS + TLS/Non-TLS + QR) ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} Create Account (WS + XHTTP + TLS/80)   ${C}║${N}"
     echo -e "${C}║${N}  ${W}[2]${N} Delete Account                       ${C}║${N}"
     echo -e "${C}║${N}  ${W}[3]${N} Check Account, Links & QR            ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[4]${N} Reset UUID (Save -> Auto Reboot)     ${C}║${N}"
     echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                    ${C}║${N}"
     echo -e "${C}╚══════════════════════════════════════════════╝${N}"
     read -p " Option >>> " V2OPT
@@ -2791,8 +3158,199 @@ v2ray_menu() {
       1) v2ray_create_user ;;
       2) v2ray_delete_user ;;
       3) v2ray_check_user ;;
+      4) v2ray_reset_uuid_menu ;;
       0) break ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
+    esac
+  done
+}
+
+v2ray_reset_uuid_menu() {
+  touch "$XRAY_DB"
+  init_packages_store
+
+  while true; do
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}     ${W}UUID RESET & REPLACE (SAVE -> REBOOT)${N}    ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  Old UUIDs are purged & disabled on Save +   ${C}║${N}"
+    echo -e "${C}║${N}  automatic server reboot.                    ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+
+    local ACCT_ROWS=()
+    local IDX=1
+
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      local vuser vuuid vexpiry vproto ncols
+      vuser=$(echo "$line" | awk '{print $1}')
+      vuuid=$(echo "$line" | awk '{print $2}')
+      ncols=$(echo "$line" | awk '{print NF}')
+      if [ "$ncols" -ge 5 ]; then
+        vexpiry=$(echo "$line" | awk '{print $3" "$4}')
+        vproto=$(echo "$line" | awk '{print $5}')
+      else
+        vexpiry=$(echo "$line" | awk '{print $3}')
+        vproto=$(echo "$line" | awk '{print $4}')
+      fi
+      local vpkg
+      vpkg=$(get_account_package "$vproto" "$vuuid")
+      echo -e "${C}║${N}  ${W}[$IDX]${N} ${G}${vuser}${N} (${Y}${vproto^^}${N}) | Pkg: ${G}${vpkg:-NONE}${N}"
+      echo -e "${C}║${N}      UUID: ${W}${vuuid}${N}"
+      ACCT_ROWS+=("${vuser}|${vuuid}|${vexpiry}|${vproto}")
+      IDX=$((IDX + 1))
+    done < "$XRAY_DB"
+
+    if [ ${#ACCT_ROWS[@]} -eq 0 ]; then
+      echo -e "${C}║${N}  ${Y}No Xray / V2Ray accounts found.${N}"
+      echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+      press_enter
+      return
+    fi
+
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back to Xray Menu                        ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Select Account # to Reset UUID >>> " SEL_IDX
+
+    if [ "$SEL_IDX" == "0" ]; then
+      break
+    fi
+
+    if ! [[ "$SEL_IDX" =~ ^[0-9]+$ ]] || [ "$SEL_IDX" -lt 1 ] || [ "$SEL_IDX" -gt "${#ACCT_ROWS[@]}" ]; then
+      echo -e "\n ${R}[!] Invalid account selection!${N}"
+      sleep 1
+      continue
+    fi
+
+    local CHOSEN="${ACCT_ROWS[$((SEL_IDX - 1))]}"
+    local TARGET_USER TARGET_OLD_UUID TARGET_EXPIRY TARGET_PROTO
+    TARGET_USER=$(echo "$CHOSEN" | cut -d'|' -f1)
+    TARGET_OLD_UUID=$(echo "$CHOSEN" | cut -d'|' -f2)
+    TARGET_EXPIRY=$(echo "$CHOSEN" | cut -d'|' -f3)
+    TARGET_PROTO=$(echo "$CHOSEN" | cut -d'|' -f4)
+
+    local NEW_UUID
+    NEW_UUID=$(python3 - << 'NEWUUIDEOF'
+import uuid
+print(str(uuid.uuid4()))
+NEWUUIDEOF
+)
+
+    local ASSIGNED_PKG
+    ASSIGNED_PKG=$(get_account_package "$TARGET_PROTO" "$TARGET_OLD_UUID")
+    [ -z "$ASSIGNED_PKG" ] && ASSIGNED_PKG=$(head -n 1 "$PACKAGES_FILE" 2>/dev/null | tr -d '[:space:]')
+
+    clear
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}        ${W}CONFIRM UUID RESET & SAVE${N}             ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  User       : ${G}${TARGET_USER}${N} (${Y}${TARGET_PROTO^^}${N})"
+    echo -e "${C}║${N}  Package    : ${G}${ASSIGNED_PKG:-NONE}${N}"
+    echo -e "${C}║${N}  Old UUID   : ${R}${TARGET_OLD_UUID} (WILL BE REMOVED)${N}"
+    echo -e "${C}║${N}  New UUID   : ${G}${NEW_UUID}${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[s]${N} Save & Auto Reboot Server (Apply Now)    ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[c]${N} Cancel                                   ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Action >>> " SAVE_UUID_OPT
+
+    case "$SAVE_UUID_OPT" in
+      s|S)
+        # 1. Replace OLD_UUID with NEW_UUID in Xray config.json and purge OLD_UUID completely
+        python3 - << PYRESET
+import json
+
+conf_path = "$XRAY_CONF"
+old_id = "$TARGET_OLD_UUID"
+new_id = "$NEW_UUID"
+proto = "$TARGET_PROTO"
+user_name = "$TARGET_USER"
+
+try:
+    with open(conf_path, "r") as f:
+        cfg = json.load(f)
+except Exception:
+    cfg = {}
+
+for inb in cfg.get("inbounds", []):
+    net = inb.get("streamSettings", {}).get("network", "")
+    iprot = inb.get("protocol", "")
+    match_inbound = (
+        (proto == "xhttp" and net == "xhttp") or
+        (proto != "xhttp" and iprot == proto and net == "ws")
+    )
+    if match_inbound:
+        clients = inb.get("settings", {}).get("clients", [])
+        updated_clients = []
+        replaced = False
+        for c in clients:
+            cid = c.get("id") or c.get("password")
+            if cid == old_id:
+                new_entry = dict(c)
+                if "password" in new_entry and iprot == "trojan":
+                    new_entry["password"] = new_id
+                else:
+                    new_entry["id"] = new_id
+                if user_name:
+                    new_entry["email"] = user_name
+                updated_clients.append(new_entry)
+                replaced = True
+            elif cid != new_id:
+                updated_clients.append(c)
+        if not replaced:
+            if iprot == "trojan":
+                updated_clients.append({"password": new_id, "email": user_name})
+            else:
+                updated_clients.append({"id": new_id, "alterId": 0, "email": user_name})
+        inb.setdefault("settings", {})["clients"] = updated_clients
+
+with open(conf_path, "w") as f:
+    json.dump(cfg, f, indent=2)
+PYRESET
+
+        # 2. Replace OLD_UUID with NEW_UUID in XRAY_DB
+        local TMP_DB
+        TMP_DB=$(mktemp)
+        while IFS= read -r dbline; do
+          [ -z "$dbline" ] && continue
+          local duser duuid dexp dprot dcols
+          duser=$(echo "$dbline" | awk '{print $1}')
+          duuid=$(echo "$dbline" | awk '{print $2}')
+          dcols=$(echo "$dbline" | awk '{print NF}')
+          if [ "$dcols" -ge 5 ]; then
+            dexp=$(echo "$dbline" | awk '{print $3" "$4}')
+            dprot=$(echo "$dbline" | awk '{print $5}')
+          else
+            dexp=$(echo "$dbline" | awk '{print $3}')
+            dprot=$(echo "$dbline" | awk '{print $4}')
+          fi
+          if [ "$duser" == "$TARGET_USER" ] && [ "$duuid" == "$TARGET_OLD_UUID" ] && [ "$dprot" == "$TARGET_PROTO" ]; then
+            echo "${duser} ${NEW_UUID} ${dexp} ${dprot}" >> "$TMP_DB"
+          else
+            echo "$dbline" >> "$TMP_DB"
+          fi
+        done < "$XRAY_DB"
+        mv "$TMP_DB" "$XRAY_DB"
+
+        # 3. Rotate package binding from OLD_UUID to NEW_UUID
+        remove_account_package "$TARGET_PROTO" "$TARGET_OLD_UUID"
+        if [ -n "$ASSIGNED_PKG" ]; then
+          set_account_package "$TARGET_PROTO" "$NEW_UUID" "$ASSIGNED_PKG"
+        fi
+
+        # 4. Sync host config, re-apply Python enhancement booster & restart Xray before reboot
+        sync_host_config
+        apply_enhancement_booster
+        systemctl restart xray > /dev/null 2>&1 || true
+
+        trigger_auto_reboot "UUID reset for '${TARGET_USER}' (${NEW_UUID}). Old UUID removed; rebooting server..."
+        ;;
+      *)
+        echo -e "\n ${Y}[!] UUID reset cancelled.${N}"
+        sleep 1
+        ;;
     esac
   done
 }
@@ -2801,11 +3359,12 @@ v2ray_create_user() {
   while true; do
     clear
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${W}       Create Xray WebSocket Account           ${N}"
+    echo -e "${W}       Create Xray CDN WS / XHTTP Account      ${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e " ${W}[1]${N} VLESS (WS /vless)"
     echo -e " ${W}[2]${N} VMess (WS /vmess)"
     echo -e " ${W}[3]${N} Trojan (WS /trojan)"
+    echo -e " ${W}[4]${N} VLESS XHTTP (/xhttp)"
     echo -e " ${W}[0]${N} Return"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     read -p " Option: " PROTO_OPT
@@ -2813,6 +3372,7 @@ v2ray_create_user() {
       1) v2ray_create_account "vless"  ;;
       2) v2ray_create_account "vmess"  ;;
       3) v2ray_create_account "trojan" ;;
+      4) v2ray_create_account "xhttp"  ;;
       0) break ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
     esac
@@ -2828,7 +3388,7 @@ v2ray_create_account() {
   clear
   DATETIME=$(date "+%b %d, %Y %I:%M:%S %p")
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-  echo -e "${C}║${N}      ${W}Create ${PROTO^^} (WebSocket) Account${N}         ${C}║${N}"
+  echo -e "${C}║${N}      ${W}Create ${PROTO^^} Account${N}                      ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Time : ${G}$DATETIME${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
@@ -2864,9 +3424,10 @@ UUIDEOF
   V2_EXPIRY=$(date -d "+${V2_DAYS} days" +"%Y-%m-%d %H:%M:%S")
 
   case $PROTO in
-    vless)  V2_PORT=10087; V2_PATH="/vless"  ;;
-    vmess)  V2_PORT=10086; V2_PATH="/vmess"  ;;
-    trojan) V2_PORT=10088; V2_PATH="/trojan" ;;
+    vless)  V2_PORT=10087; V2_PATH="/vless"; V2_NET="ws"    ;;
+    vmess)  V2_PORT=10086; V2_PATH="/vmess"; V2_NET="ws"    ;;
+    trojan) V2_PORT=10088; V2_PATH="/trojan"; V2_NET="ws"   ;;
+    xhttp)  V2_PORT=10089; V2_PATH="/xhttp"; V2_NET="xhttp" ;;
   esac
 
   echo "$V2_USER $V2_UUID $V2_EXPIRY $PROTO" >> "$XRAY_DB"
@@ -2887,37 +3448,56 @@ uuid_val = "$V2_UUID"
 user = "$V2_USER"
 port = int("$V2_PORT")
 path_ws = "$V2_PATH"
+net_mode = "$V2_NET"
 
-found = False
-for inb in cfg.get("inbounds", []):
-    if inb.get("protocol") == proto:
-        clients = inb["settings"].get("clients", [])
+if proto == "xhttp":
+    target_proto = "vless"
+    found = False
+    for inb in cfg.get("inbounds", []):
+        if inb.get("streamSettings", {}).get("network") == "xhttp":
+            clients = inb["settings"].get("clients", [])
+            clients.append({"id": uuid_val, "email": user})
+            inb["settings"]["clients"] = clients
+            found = True
+            break
+    if not found:
+        cfg.setdefault("inbounds", []).append({
+            "port": port,
+            "listen": "127.0.0.1",
+            "protocol": target_proto,
+            "settings": {"clients": [{"id": uuid_val, "email": user}], "decryption": "none"},
+            "streamSettings": {"network": "xhttp", "xhttpSettings": {"path": path_ws, "mode": "auto"}}
+        })
+else:
+    found = False
+    for inb in cfg.get("inbounds", []):
+        if inb.get("protocol") == proto and inb.get("streamSettings", {}).get("network") == net_mode:
+            clients = inb["settings"].get("clients", [])
+            if proto == "trojan":
+                clients.append({"password": uuid_val, "email": user})
+            else:
+                clients.append({"id": uuid_val, "alterId": 0, "email": user})
+            inb["settings"]["clients"] = clients
+            found = True
+            break
+    if not found:
         if proto == "trojan":
-            clients.append({"password": uuid_val, "email": user})
+            new_inb = {
+                "port": port,
+                "listen": "127.0.0.1",
+                "protocol": proto,
+                "settings": {"clients": [{"password": uuid_val, "email": user}]},
+                "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws, "heartbeatPeriod": 15}}
+            }
         else:
-            clients.append({"id": uuid_val, "alterId": 0, "email": user})
-        inb["settings"]["clients"] = clients
-        found = True
-        break
-
-if not found:
-    if proto == "trojan":
-        new_inb = {
-            "port": port,
-            "listen": "127.0.0.1",
-            "protocol": proto,
-            "settings": {"clients": [{"password": uuid_val, "email": user}]},
-            "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws, "heartbeatPeriod": 20}}
-        }
-    else:
-        new_inb = {
-            "port": port,
-            "listen": "127.0.0.1",
-            "protocol": proto,
-            "settings": {"clients": [{"id": uuid_val, "alterId": 0, "email": user}]},
-            "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws, "heartbeatPeriod": 20}}
-        }
-    cfg.setdefault("inbounds", []).append(new_inb)
+            new_inb = {
+                "port": port,
+                "listen": "127.0.0.1",
+                "protocol": proto,
+                "settings": {"clients": [{"id": uuid_val, "alterId": 0, "email": user}]},
+                "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws, "heartbeatPeriod": 15}}
+            }
+        cfg.setdefault("inbounds", []).append(new_inb)
 
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
@@ -2933,22 +3513,27 @@ PYEOF
   MINS_LEFT=$(( (SECS_TOTAL % 3600) / 60 ))
   SECS_LEFT=$(( SECS_TOTAL % 60 ))
 
+  ACTIVE_CDN="${CDN_DOMAIN:-$HOST}"
+
   if [ "$PROTO" == "trojan" ]; then
-    LINK_TLS="trojan://${V2_UUID}@${HOST}:443?type=ws&security=tls&host=${HOST}&path=${V2_PATH}&sni=${HOST}#${V2_UUID}"
-    LINK_NTLS="trojan://${V2_UUID}@${HOST}:80?type=ws&host=${HOST}&path=${V2_PATH}#${V2_UUID}"
+    LINK_TLS="trojan://${V2_UUID}@${ACTIVE_CDN}:443?type=ws&security=tls&host=${ACTIVE_CDN}&path=${V2_PATH}&sni=${ACTIVE_CDN}#${V2_UUID}"
+    LINK_NTLS="trojan://${V2_UUID}@${ACTIVE_CDN}:80?type=ws&host=${ACTIVE_CDN}&path=${V2_PATH}#${V2_UUID}"
+  elif [ "$PROTO" == "xhttp" ]; then
+    LINK_TLS="vless://${V2_UUID}@${ACTIVE_CDN}:443?encryption=none&type=xhttp&security=tls&host=${ACTIVE_CDN}&path=${V2_PATH}&sni=${ACTIVE_CDN}&mode=auto#${V2_USER}"
+    LINK_NTLS="vless://${V2_UUID}@${ACTIVE_CDN}:80?encryption=none&type=xhttp&host=${ACTIVE_CDN}&path=${V2_PATH}&mode=auto#${V2_USER}"
   elif [ "$PROTO" == "vless" ]; then
-    LINK_TLS="vless://${V2_UUID}@${HOST}:443?encryption=none&type=ws&security=tls&host=${HOST}&path=${V2_PATH}&sni=${HOST}#${V2_USER}"
-    LINK_NTLS="vless://${V2_UUID}@${HOST}:80?encryption=none&type=ws&host=${HOST}&path=${V2_PATH}#${V2_USER}"
+    LINK_TLS="vless://${V2_UUID}@${ACTIVE_CDN}:443?encryption=none&type=ws&security=tls&host=${ACTIVE_CDN}&path=${V2_PATH}&sni=${ACTIVE_CDN}#${V2_USER}"
+    LINK_NTLS="vless://${V2_UUID}@${ACTIVE_CDN}:80?encryption=none&type=ws&host=${ACTIVE_CDN}&path=${V2_PATH}#${V2_USER}"
   else
-    VMESS_JSON="{\"v\":\"2\",\"ps\":\"${V2_USER}\",\"add\":\"${HOST}\",\"port\":\"443\",\"id\":\"${V2_UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"${V2_PATH}\",\"tls\":\"tls\",\"sni\":\"${HOST}\"}"
-    VMESS_JSON2="{\"v\":\"2\",\"ps\":\"${V2_USER}\",\"add\":\"${HOST}\",\"port\":\"80\",\"id\":\"${V2_UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"${V2_PATH}\",\"tls\":\"\"}"
+    VMESS_JSON="{\"v\":\"2\",\"ps\":\"${V2_USER}\",\"add\":\"${ACTIVE_CDN}\",\"port\":\"443\",\"id\":\"${V2_UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_CDN}\",\"path\":\"${V2_PATH}\",\"tls\":\"tls\",\"sni\":\"${ACTIVE_CDN}\"}"
+    VMESS_JSON2="{\"v\":\"2\",\"ps\":\"${V2_USER}\",\"add\":\"${ACTIVE_CDN}\",\"port\":\"80\",\"id\":\"${V2_UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_CDN}\",\"path\":\"${V2_PATH}\",\"tls\":\"\"}"
     LINK_TLS="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
     LINK_NTLS="vmess://$(echo -n "$VMESS_JSON2" | base64 -w 0)"
   fi
 
   clear
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${W}      ${PROTO^^} (WEBSOCKET) ACCOUNT CREATED         ${N}"
+  echo -e "${W}      ${PROTO^^} ACCOUNT CREATED                     ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   if [ "$PROTO" == "trojan" ]; then
     echo -e " Password    : ${G}$V2_UUID${N}"
@@ -2957,11 +3542,12 @@ PYEOF
     echo -e " UUID        : ${G}$V2_UUID${N}"
   fi
   echo -e " Package     : ${G}$SELECTED_PACKAGE${N}"
-  echo -e " Network     : ${G}WebSocket (ws)${N}"
+  echo -e " Network     : ${G}${V2_NET} | Keep-Alive | No-LB${N}"
   echo -e " Path        : ${G}$V2_PATH${N}"
   echo -e " Expire Date : ${G}$V2_EXPIRY${N}"
   echo -e " Expires in  : ${G}${DAYS_LEFT}d ${HRS_LEFT}h ${MINS_LEFT}m ${SECS_LEFT}s${N}"
-  echo -e " Domain/SNI  : ${G}$HOST${N}"
+  echo -e " Domain      : ${G}$HOST${N}"
+  echo -e " CDN / SNI   : ${G}$ACTIVE_CDN${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e " TLS (443):"
   echo -e " ${G}${LINK_TLS}${N}"
@@ -2983,6 +3569,7 @@ v2ray_delete_user() {
     echo -e " ${W}[1]${N} VLESS"
     echo -e " ${W}[2]${N} VMess"
     echo -e " ${W}[3]${N} Trojan"
+    echo -e " ${W}[4]${N} XHTTP"
     echo -e " ${W}[0]${N} Return"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     read -p " Option: " PROTO_DEL
@@ -2990,6 +3577,7 @@ v2ray_delete_user() {
       1) v2ray_delete_by_proto "vless"  ;;
       2) v2ray_delete_by_proto "vmess"  ;;
       3) v2ray_delete_by_proto "trojan" ;;
+      4) v2ray_delete_by_proto "xhttp"  ;;
       0) break ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
     esac
@@ -3098,7 +3686,9 @@ try:
     with open(path) as f:
         cfg = json.load(f)
     for inb in cfg.get("inbounds", []):
-        if inb.get("protocol") == "$FILTER_PROTO":
+        if "$FILTER_PROTO" == "xhttp" and inb.get("streamSettings", {}).get("network") == "xhttp":
+            inb["settings"]["clients"] = []
+        elif inb.get("protocol") == "$FILTER_PROTO":
             inb["settings"]["clients"] = []
     with open(path, "w") as f:
         json.dump(cfg, f, indent=2)
@@ -3126,7 +3716,10 @@ try:
     with open(path) as f:
         cfg = json.load(f)
     for inb in cfg.get("inbounds", []):
-        if inb.get("protocol") == proto:
+        if proto == "xhttp" and inb.get("streamSettings", {}).get("network") == "xhttp":
+            clients = inb["settings"].get("clients", [])
+            inb["settings"]["clients"] = [c for c in clients if c.get("id") != uuid_val]
+        elif inb.get("protocol") == proto:
             clients = inb["settings"].get("clients", [])
             if proto in ["vless", "vmess"]:
                 inb["settings"]["clients"] = [c for c in clients if c.get("id") != uuid_val]
@@ -3156,6 +3749,7 @@ v2ray_check_user() {
     echo -e " ${W}[1]${N} VLESS"
     echo -e " ${W}[2]${N} VMess"
     echo -e " ${W}[3]${N} Trojan"
+    echo -e " ${W}[4]${N} XHTTP"
     echo -e " ${W}[0]${N} Return"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     read -p " Option: " PROTO_CHK
@@ -3163,6 +3757,7 @@ v2ray_check_user() {
       1) v2ray_check_by_proto "vless"  ;;
       2) v2ray_check_by_proto "vmess"  ;;
       3) v2ray_check_by_proto "trojan" ;;
+      4) v2ray_check_by_proto "xhttp"  ;;
       0) break ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
     esac
@@ -3175,12 +3770,13 @@ v2ray_check_by_proto() {
   touch "$XRAY_DB"
   clear
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${W}           ${FILTER_PROTO^^} (WS) USERS                   ${N}"
+  echo -e "${W}           ${FILTER_PROTO^^} USERS                       ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo ""
 
   FOUND=0
   TODAY_S=$(date +%s)
+  ACTIVE_CDN="${CDN_DOMAIN:-$HOST}"
 
   while IFS= read -r line; do
     [ -z "$line" ] && continue
@@ -3219,22 +3815,27 @@ v2ray_check_by_proto() {
       fi
 
       if [ "$FILTER_PROTO" == "trojan" ]; then
-        LINK_TLS="trojan://${vuuid}@${HOST}:443?type=ws&security=tls&host=${HOST}&path=/trojan&sni=${HOST}#${vuuid}"
-        LINK_NTLS="trojan://${vuuid}@${HOST}:80?type=ws&host=${HOST}&path=/trojan#${vuuid}"
+        LINK_TLS="trojan://${vuuid}@${ACTIVE_CDN}:443?type=ws&security=tls&host=${ACTIVE_CDN}&path=/trojan&sni=${ACTIVE_CDN}#${vuuid}"
+        LINK_NTLS="trojan://${vuuid}@${ACTIVE_CDN}:80?type=ws&host=${ACTIVE_CDN}&path=/trojan#${vuuid}"
         echo -e " Password    : ${G}$vuuid${N}"
+      elif [ "$FILTER_PROTO" == "xhttp" ]; then
+        LINK_TLS="vless://${vuuid}@${ACTIVE_CDN}:443?encryption=none&type=xhttp&security=tls&host=${ACTIVE_CDN}&path=/xhttp&sni=${ACTIVE_CDN}&mode=auto#${vuser}"
+        LINK_NTLS="vless://${vuuid}@${ACTIVE_CDN}:80?encryption=none&type=xhttp&host=${ACTIVE_CDN}&path=/xhttp&mode=auto#${vuser}"
+        echo -e " Username    : ${G}$vuser${N}"
       elif [ "$FILTER_PROTO" == "vless" ]; then
-        LINK_TLS="vless://${vuuid}@${HOST}:443?encryption=none&type=ws&security=tls&host=${HOST}&path=${V2_PATH:-/vless}&sni=${HOST}#${vuser}"
-        LINK_NTLS="vless://${vuuid}@${HOST}:80?encryption=none&type=ws&host=${HOST}&path=/vless#${vuser}"
+        LINK_TLS="vless://${vuuid}@${ACTIVE_CDN}:443?encryption=none&type=ws&security=tls&host=${ACTIVE_CDN}&path=/vless&sni=${ACTIVE_CDN}#${vuser}"
+        LINK_NTLS="vless://${vuuid}@${ACTIVE_CDN}:80?encryption=none&type=ws&host=${ACTIVE_CDN}&path=/vless#${vuser}"
         echo -e " Username    : ${G}$vuser${N}"
       else
-        VMESS_TLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${HOST}\",\"port\":\"443\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${HOST}\"}"
-        VMESS_NTLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${HOST}\",\"port\":\"80\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"/vmess\",\"tls\":\"\"}"
+        VMESS_TLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${ACTIVE_CDN}\",\"port\":\"443\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_CDN}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${ACTIVE_CDN}\"}"
+        VMESS_NTLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${ACTIVE_CDN}\",\"port\":\"80\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${ACTIVE_CDN}\",\"path\":\"/vmess\",\"tls\":\"\"}"
         LINK_TLS="vmess://$(echo -n "$VMESS_TLS" | base64 -w 0)"
         LINK_NTLS="vmess://$(echo -n "$VMESS_NTLS" | base64 -w 0)"
         echo -e " Username    : ${G}$vuser${N}"
       fi
 
       echo -e " Package     : ${G}$VP_NAME${N}"
+      echo -e " CDN / SNI   : ${G}$ACTIVE_CDN${N}"
       echo -e " Expiration  : ${G}$TIME_LEFT${N}"
       echo -e " TLS (443)   :"
       echo -e " ${G}${LINK_TLS}${N}"
