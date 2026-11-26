@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =============================================
-#   Vantricks VPS MANAGER
-#   OS: Debian/Ubuntu
+#   Vantricks VPS MANAGER (SSH + OVPN + XRAY/WS)
+#   OS: Debian/Ubuntu | Proxified DNS Ready
 # =============================================
 
 # Colors
@@ -15,18 +15,23 @@ N='\033[0m'
 
 DIV="════════════════════════════════════════════════"
 CONFIG_FILE="/etc/vantricks_script.conf"
+PACKAGES_FILE="/etc/vantricks_packages.list"
+OVPN_DIR="/etc/openvpn/server"
+OVPN_CLIENT_DIR="/etc/openvpn/client"
+XRAY_CONF="/usr/local/etc/xray/config.json"
+XRAY_DB="/etc/xray/accounts.db"
+NGINX_V2RAY_CONF="/etc/nginx/conf.d/v2ray.conf"
+SERVER_ERROR_MSG="Server error contact owner vantricks team."
 
 # ── PASSWORD CHECK ────────────────────────────────
 check_password() {
-  # Skip if already installed
   if [ ! -f "$CONFIG_FILE" ]; then
     clear
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
     echo -e "${C}║${N}          ${W}Vantricks VPS Manager${N}                ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    read -p "  Enter Script Password : " INPUT_PASS
+    read -p "  Password (Vantricks2026) : " INPUT_PASS
 
-    # Your personal password - ikaw lang nakakaalam nito
     CORRECT_PASS="Vantricks2026"
 
     if [ "$INPUT_PASS" == "$CORRECT_PASS" ]; then
@@ -42,7 +47,7 @@ check_password() {
 # ─────────────────────────────────────────────────
 
 # ══════════════════════════════════════════════
-#   HELPERS
+#   HELPERS, PACKAGE GATE & HOST DOMAIN SYNC
 # ══════════════════════════════════════════════
 
 press_enter() {
@@ -58,20 +63,145 @@ check_root() {
 }
 
 check_os() {
-  DEBIAN_VER=$(grep -oP '(?<=VERSION_ID=")[0-9]+' /etc/os-release 2>/dev/null || echo "0")
   DISTRO=$(grep -oP '(?<=^ID=).+' /etc/os-release 2>/dev/null | tr -d '"' || echo "unknown")
-
   if [ "$DISTRO" != "debian" ] && [ "$DISTRO" != "ubuntu" ]; then
     echo -e "${R}[ERROR] Unsupported OS! Only Debian/Ubuntu is supported.${N}"
     exit 1
   fi
 }
 
+init_packages_store() {
+  mkdir -p /etc
+  touch "$PACKAGES_FILE"
+  sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE" 2>/dev/null || true
+}
+
+count_packages() {
+  init_packages_store
+  grep -c '[^[:space:]]' "$PACKAGES_FILE" 2>/dev/null || echo 0
+}
+
+verify_package_gate() {
+  local PKG_CNT
+  PKG_CNT=$(count_packages)
+  if [ "$PKG_CNT" -le 0 ]; then
+    echo ""
+    echo -e " ${R}[!] ${SERVER_ERROR_MSG}${N}"
+    echo -e " ${Y}[i] Add a package name in [6] Package Manager first.${N}"
+    sleep 2
+    return 1
+  fi
+  return 0
+}
+
+trigger_auto_reboot() {
+  local REASON="${1:-Applying package configuration...}"
+  echo ""
+  echo -e " ${G}[✓] ${REASON}${N}"
+  echo -e " ${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e " ${G} Rebooting automatically in...${N}"
+  for i in 3 2 1; do
+    echo -e " ${R}   $i...${N}"
+    sleep 1
+  done
+  echo -e " ${G} Reconnect and type: menu${N}"
+  sleep 1
+  reboot
+}
+
+sync_host_config() {
+  [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+  SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  [ -z "$HOST" ] && HOST="$SERVER_IP"
+  [ -z "$NAMESERVER" ] && NAMESERVER="$HOST"
+
+  # Ensure Nginx v2ray reverse proxy uses current $HOST and proxy headers
+  if [ -d /etc/nginx/conf.d ]; then
+    cat > "$NGINX_V2RAY_CONF" << NGINXEOF
+server {
+    listen 8880;
+    server_name ${HOST} _;
+
+    set \$target_host \$http_host;
+    if (\$target_host = "") {
+        set \$target_host "${HOST}";
+    }
+
+    location /vmess {
+        proxy_pass http://127.0.0.1:10086;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$target_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header CF-Connecting-IP \$http_cf_connecting_ip;
+        proxy_read_timeout 86400;
+    }
+
+    location /vless {
+        proxy_pass http://127.0.0.1:10087;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$target_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header CF-Connecting-IP \$http_cf_connecting_ip;
+        proxy_read_timeout 86400;
+    }
+
+    location /trojan {
+        proxy_pass http://127.0.0.1:10088;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$target_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header CF-Connecting-IP \$http_cf_connecting_ip;
+        proxy_read_timeout 86400;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$target_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header CF-Connecting-IP \$http_cf_connecting_ip;
+        proxy_read_timeout 86400;
+        add_header Upgrade "websocket" always;
+        add_header Connection "Upgrade" always;
+        add_header Sec-WebSocket-Version "13" always;
+        add_header Via "vantricks-SSH" always;
+    }
+}
+NGINXEOF
+    nginx -t > /dev/null 2>&1 && systemctl reload nginx > /dev/null 2>&1 || true
+  fi
+}
+
 load_config() {
+  init_packages_store
   if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
+    sync_host_config
   else
     first_run_setup
+  fi
+}
+
+print_qr_link() {
+  local LABEL="$1"
+  local URI="$2"
+  echo -e " ${W}${LABEL} QR:${N}"
+  if command -v qrencode >/dev/null 2>&1; then
+    qrencode -t UTF8 -m 1 "$URI" 2>/dev/null || true
+  else
+    echo -e " ${Y}[!] Install qrencode to view terminal QR codes.${N}"
   fi
 }
 
@@ -82,31 +212,248 @@ get_info() {
   RAM_FREE=$(free -m | awk '/Mem:/ {print $4}')
   RAM_PERCENT=$(awk "BEGIN {printf \"%.2f\", ($RAM_USED/$RAM_TOTAL)*100}")
   DATETIME=$(TZ="Asia/Manila" date "+%m-%d-%Y %I:%M:%S %p")
-  SSH_ONLINE=0
-  SSH_ONLINE=$(ss -tnp 2>/dev/null | grep -c "sshd") || SSH_ONLINE=0
+
+  SSH_ONLINE=$(ss -tnp 2>/dev/null | grep -c "sshd" || echo 0)
   SSH_ONLINE=$(echo "$SSH_ONLINE" | tr -d '[:space:]')
   [ -z "$SSH_ONLINE" ] || ! [[ "$SSH_ONLINE" =~ ^[0-9]+$ ]] && SSH_ONLINE=0
+
+  OVPN_UDP_ON=$(ss -unp 2>/dev/null | grep -c "openvpn" || echo 0)
+  OVPN_TCP_ON=$(ss -tnp 2>/dev/null | grep -c "openvpn" || echo 0)
+  OVPN_ONLINE=$(( ${OVPN_UDP_ON:-0} + ${OVPN_TCP_ON:-0} ))
+
   SSH_ACCOUNTS=$(awk -F: '$3>=1000 && $1!="nobody"' /etc/passwd | wc -l | tr -d '[:space:]')
   [ -z "$SSH_ACCOUNTS" ] || ! [[ "$SSH_ACCOUNTS" =~ ^[0-9]+$ ]] && SSH_ACCOUNTS=0
+
   V2RAY_ACCOUNTS=0
-  if [ -f /etc/xray/accounts.db ]; then
-    V2RAY_ACCOUNTS=$(grep -c '[^[:space:]]' /etc/xray/accounts.db 2>/dev/null | tr -d '[:space:]')
+  if [ -f "$XRAY_DB" ]; then
+    V2RAY_ACCOUNTS=$(grep -c '[^[:space:]]' "$XRAY_DB" 2>/dev/null || echo 0)
+    V2RAY_ACCOUNTS=$(echo "$V2RAY_ACCOUNTS" | tr -d '[:space:]')
     [ -z "$V2RAY_ACCOUNTS" ] || ! [[ "$V2RAY_ACCOUNTS" =~ ^[0-9]+$ ]] && V2RAY_ACCOUNTS=0
   fi
+
+  PKG_COUNT=$(count_packages)
   TOTAL_ACCOUNTS=$(( ${SSH_ACCOUNTS} + ${V2RAY_ACCOUNTS} ))
   CPU_CORES=$(nproc 2>/dev/null || echo 1)
   CPU_LOAD=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "0")
   SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  [ -z "$HOST" ] && HOST="$SERVER_IP"
 }
 
+# ══════════════════════════════════════════════
+#   PACKAGE NAME MANAGER (ADD / LIST / SAVE / EDIT / DELETE / REBOOT)
+# ══════════════════════════════════════════════
+
+add_package_name() {
+  init_packages_store
+  clear
+  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+  echo -e "${C}║${N}            ${W}ADD PACKAGE NAME${N}                    ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  read -p "  Enter Package Name : " PKG_INPUT
+  PKG_INPUT=$(echo "$PKG_INPUT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+  if [ -z "$PKG_INPUT" ]; then
+    echo -e "\n ${R}[!] Package name cannot be empty!${N}"
+    sleep 2
+    return
+  fi
+
+  echo ""
+  echo -e " Package to add : ${G}${PKG_INPUT}${N}"
+  echo -e " ${W}[s]${N} Save & Auto Reboot    ${W}[c]${N} Cancel"
+  read -p " Action >>> " SAVE_ACT
+
+  case "$SAVE_ACT" in
+    s|S|y|Y)
+      echo "$PKG_INPUT" >> "$PACKAGES_FILE"
+      sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
+      trigger_auto_reboot "Saved package '${PKG_INPUT}'. Rebooting to apply..."
+      ;;
+    *)
+      echo -e "\n ${Y}[!] Cancelled. Package not saved.${N}"
+      sleep 1
+      ;;
+  esac
+}
+
+edit_package_name() {
+  init_packages_store
+  mapfile -t PKGS < "$PACKAGES_FILE"
+  if [ ${#PKGS[@]} -eq 0 ]; then
+    echo -e "\n ${R}[!] ${SERVER_ERROR_MSG}${N}"
+    sleep 2
+    return
+  fi
+
+  read -p "  Enter package number to edit : " EDIT_IDX
+  if ! [[ "$EDIT_IDX" =~ ^[0-9]+$ ]] || [ "$EDIT_IDX" -lt 1 ] || [ "$EDIT_IDX" -gt "${#PKGS[@]}" ]; then
+    echo -e "\n ${R}[!] Invalid package number!${N}"
+    sleep 1
+    return
+  fi
+
+  local ARR_POS=$((EDIT_IDX - 1))
+  local OLD_PKG="${PKGS[$ARR_POS]}"
+  read -p "  New package name (current: ${OLD_PKG}) : " NEW_PKG
+  NEW_PKG=$(echo "$NEW_PKG" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+  if [ -z "$NEW_PKG" ]; then
+    echo -e "\n ${R}[!] Package name cannot be empty!${N}"
+    sleep 1
+    return
+  fi
+
+  PKGS[$ARR_POS]="$NEW_PKG"
+  printf "%s\n" "${PKGS[@]}" > "$PACKAGES_FILE"
+  sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
+  echo -e "\n ${G}[✓] Updated #${EDIT_IDX} to '${NEW_PKG}'. Press [s] to Save & Reboot or [r] to Reboot.${N}"
+  sleep 1
+}
+
+delete_package_name() {
+  init_packages_store
+  mapfile -t PKGS < "$PACKAGES_FILE"
+  if [ ${#PKGS[@]} -eq 0 ]; then
+    echo -e "\n ${R}[!] ${SERVER_ERROR_MSG}${N}"
+    sleep 2
+    return
+  fi
+
+  read -p "  Enter package number to delete : " DEL_IDX
+  if ! [[ "$DEL_IDX" =~ ^[0-9]+$ ]] || [ "$DEL_IDX" -lt 1 ] || [ "$DEL_IDX" -gt "${#PKGS[@]}" ]; then
+    echo -e "\n ${R}[!] Invalid package number!${N}"
+    sleep 1
+    return
+  fi
+
+  local ARR_POS=$((DEL_IDX - 1))
+  local REM_PKG="${PKGS[$ARR_POS]}"
+  unset 'PKGS[$ARR_POS]'
+  if [ ${#PKGS[@]} -gt 0 ]; then
+    printf "%s\n" "${PKGS[@]}" > "$PACKAGES_FILE"
+  else
+    : > "$PACKAGES_FILE"
+  fi
+  sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
+  echo -e "\n ${G}[✓] Deleted package '${REM_PKG}'.${N}"
+  sleep 1
+}
+
+list_package_names_view() {
+  init_packages_store
+  clear
+  echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+  echo -e "${C}║${N}            ${W}LIST PACKAGE NAMES${N}                  ${C}║${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+
+  mapfile -t PKGS < "$PACKAGES_FILE"
+  if [ ${#PKGS[@]} -eq 0 ]; then
+    echo -e "${C}║${N}  ${R}${SERVER_ERROR_MSG}${N}"
+  else
+    local i=1
+    for p in "${PKGS[@]}"; do
+      echo -e "${C}║${N}  ${W}[$i]${N} ${G}${p}${N}"
+      i=$((i + 1))
+    done
+  fi
+
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e "${C}║${N}  ${W}[s]${N} Save & Reboot    ${W}[e]${N} Edit Package     ${C}║${N}"
+  echo -e "${C}║${N}  ${W}[d]${N} Delete Package   ${W}[r]${N} Reboot Now       ${C}║${N}"
+  echo -e "${C}║${N}  ${W}[0]${N} Back                                      ${C}║${N}"
+  echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+}
+
+package_menu() {
+  while true; do
+    init_packages_store
+    clear
+    local CNT
+    CNT=$(count_packages)
+
+    echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+    echo -e "${C}║${N}       ${W}PACKAGE NAME & SET-UP MANAGER${N}            ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    if [ "$CNT" -le 0 ]; then
+      echo -e "${C}║${N}  Status : ${R}${SERVER_ERROR_MSG}${N}"
+    else
+      echo -e "${C}║${N}  Status : ${G}${CNT} Active Package(s) Ready${N}"
+    fi
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} Add Package Name (Save + Auto Reboot)   ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[2]${N} Show List Package Name                   ${C}║${N}"
+    echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}  ${W}[s]${N} Save & Reboot    ${W}[e]${N} Edit Package     ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[d]${N} Delete Package   ${W}[r]${N} Reboot Now       ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                        ${C}║${N}"
+    echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+    read -p " Option >>> " POPT
+
+    case "$POPT" in
+      1)
+        add_package_name
+        ;;
+      2)
+        while true; do
+          list_package_names_view
+          read -p " Action >>> " LACT
+          case "$LACT" in
+            s|S)
+              sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
+              trigger_auto_reboot "Package list saved. Rebooting to apply..."
+              ;;
+            e|E)
+              edit_package_name
+              ;;
+            d|D)
+              delete_package_name
+              ;;
+            r|R)
+              trigger_auto_reboot "Rebooting server..."
+              ;;
+            0)
+              break
+              ;;
+            *)
+              echo -e "\n ${R}[!] Invalid option!${N}"
+              sleep 1
+              ;;
+          esac
+        done
+        ;;
+      s|S)
+        sed -i '/^[[:space:]]*$/d' "$PACKAGES_FILE"
+        trigger_auto_reboot "Package configuration saved. Rebooting to apply..."
+        ;;
+      e|E)
+        list_package_names_view
+        edit_package_name
+        ;;
+      d|D)
+        list_package_names_view
+        delete_package_name
+        ;;
+      r|R)
+        trigger_auto_reboot "Rebooting server..."
+        ;;
+      0)
+        break
+        ;;
+      *)
+        echo -e "${R} Invalid option!${N}"
+        sleep 1
+        ;;
+    esac
+  done
+}
 
 # ══════════════════════════════════════════════
-#   AUTO REMOVE EXPIRED
+#   AUTO REMOVE EXPIRED (SSH + OVPN + XRAY)
 # ══════════════════════════════════════════════
 
 auto_remove_expired() {
   local NOW_S=$(date +%s)
-  # Remove expired SSH accounts
+
   while IFS=: read -r user _ uid _ _ _ _; do
     if [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
       EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
@@ -114,13 +461,14 @@ auto_remove_expired() {
         EXP_S=$(date -d "$EXP" +%s 2>/dev/null)
         if [ -n "$EXP_S" ] && [ "$EXP_S" -lt "$NOW_S" ]; then
           sed -i "/Match User $user/,/MaxSessions/d" /etc/ssh/sshd_config 2>/dev/null
+          rm -f "${OVPN_CLIENT_DIR}/${user}-tcp443.ovpn" "${OVPN_CLIENT_DIR}/${user}-udp1194.ovpn" "${OVPN_CLIENT_DIR}/${user}.ovpn" 2>/dev/null
           userdel -r "$user" > /dev/null 2>&1
         fi
       fi
     fi
   done < /etc/passwd
-  # Remove expired xray accounts
-  if [ -f /etc/xray/accounts.db ]; then
+
+  if [ -f "$XRAY_DB" ]; then
     TMP=$(mktemp)
     while IFS= read -r line; do
       [ -z "$line" ] && continue
@@ -130,18 +478,17 @@ auto_remove_expired() {
       else
         vexpiry=$(echo "$line" | awk '{print $3}')
       fi
-      EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null)
-      if [ -n "$EXP_S" ] && [ "$EXP_S" -gt "$NOW_S" ]; then
+      EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null || echo 0)
+      if [ "$EXP_S" -gt "$NOW_S" ]; then
         echo "$line" >> "$TMP"
       fi
-    done < /etc/xray/accounts.db
-    mv "$TMP" /etc/xray/accounts.db
-    systemctl restart xray > /dev/null 2>&1
+    done < "$XRAY_DB"
+    mv "$TMP" "$XRAY_DB"
   fi
 }
 
 # ══════════════════════════════════════════════
-#   FIRST RUN SETUP
+#   FIRST RUN SETUP (AUTO POP-UP ON INSTALL)
 # ══════════════════════════════════════════════
 
 first_run_setup() {
@@ -149,15 +496,12 @@ first_run_setup() {
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
   echo -e "${C}║${N}       ${W}Vantricks VPS Manager - Setup${N}            ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  read -p "  Host (ex. vantricks.kalmado.sbs): " INPUT_HOST
-  read -p "  NS (ex. ns.vantricks.kalmado.sbs): " INPUT_NS
+  read -p "  Host (e.g. vantricks.yourdomain.sbs)     : " INPUT_HOST
+  read -p "  NS (Nameserver, e.g. ns.yourdomain.sbs)  : " INPUT_NS
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${C}║${N}           ${W}Public Key Type${N}                  ${C}║${N}"
-  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${C}║${N}  ${W}[1]${N} Default                              ${C}║${N}"
-  echo -e "${C}║${N}  ${W}[2]${N} Random                               ${C}║${N}"
+  echo -e "${C}║${N}  Public Key Type: 1 (Default) or 2 (Random)  ${C}║${N}"
   echo -e "${C}╚══════════════════════════════════════════════╝${N}"
-  read -p " Choose [1/2]: " PK_CHOICE
+  read -p "  Select [1/2]: " PK_CHOICE
   case $PK_CHOICE in
     1)
       INPUT_PUBKEY=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
@@ -177,9 +521,193 @@ first_run_setup() {
   echo "PUBKEY=$INPUT_PUBKEY" >> "$CONFIG_FILE"
   echo "PUBKEY_TYPE=$PUBKEY_TYPE" >> "$CONFIG_FILE"
   source "$CONFIG_FILE"
-  echo -e " ${G}[✓] Configuration saved!${N}"
+  echo -e " ${G}[✓] Configuration saved! Starting installation...${N}"
   sleep 1
   install_all
+}
+
+# ══════════════════════════════════════════════
+#   INSTALL PYTHON, QRENCODE & CORE PACKAGES
+# ══════════════════════════════════════════════
+
+install_python_deps() {
+  echo -e " ${Y}[*] Installing Python 3, qrencode & system packages...${N}"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    python3 python3-pip python3-venv python3-setuptools qrencode \
+    openssh-server curl wget openssl net-tools psmisc \
+    openvpn easy-rsa iptables-persistent > /dev/null 2>&1
+
+  python3 -m pip install --break-system-packages --quiet websockets requests qrcode 2>/dev/null || true
+  echo -e " ${G}[✓] Python 3, qrencode & system dependencies ready${N}"
+}
+
+# ══════════════════════════════════════════════
+#   INSTALL OPENVPN (TCP/443 via sslh + UDP/1194)
+# ══════════════════════════════════════════════
+
+install_openvpn() {
+  echo -e " ${Y}[*] Installing & configuring OpenVPN (TCP/443 + UDP/1194)...${N}"
+  mkdir -p "$OVPN_DIR" "$OVPN_CLIENT_DIR" /etc/openvpn/easy-rsa /var/log/openvpn
+
+  if [ -d /usr/share/easy-rsa ]; then
+    cp -r /usr/share/easy-rsa/* /etc/openvpn/easy-rsa/ 2>/dev/null || true
+  fi
+
+  cd /etc/openvpn/easy-rsa || return
+  export EASYRSA_BATCH=1
+  export EASYRSA_REQ_CN="Vantricks-OVPN-CA"
+
+  if [ ! -f /etc/openvpn/easy-rsa/pki/ca.crt ]; then
+    ./easyrsa init-pki > /dev/null 2>&1
+    ./easyrsa build-ca nopass > /dev/null 2>&1
+    ./easyrsa gen-dh > /dev/null 2>&1
+    ./easyrsa build-server-full server nopass > /dev/null 2>&1
+    ./easyrsa build-client-full vantricks-client nopass > /dev/null 2>&1
+    openvpn --genkey secret /etc/openvpn/easy-rsa/pki/ta.key > /dev/null 2>&1
+  fi
+
+  cp /etc/openvpn/easy-rsa/pki/ca.crt "$OVPN_DIR/" 2>/dev/null || true
+  cp /etc/openvpn/easy-rsa/pki/issued/server.crt "$OVPN_DIR/" 2>/dev/null || true
+  cp /etc/openvpn/easy-rsa/pki/private/server.key "$OVPN_DIR/" 2>/dev/null || true
+  cp /etc/openvpn/easy-rsa/pki/dh.pem "$OVPN_DIR/" 2>/dev/null || true
+  cp /etc/openvpn/easy-rsa/pki/ta.key "$OVPN_DIR/" 2>/dev/null || true
+
+  PAM_SO="/usr/lib/x86_64-linux-gnu/openvpn/plugins/openvpn-plugin-auth-pam.so"
+  if [ ! -f "$PAM_SO" ]; then
+    PAM_SO=$(find /usr/lib -name "openvpn-plugin-auth-pam.so" 2>/dev/null | head -n 1)
+  fi
+
+  cat > "${OVPN_DIR}/server.conf" << EOF
+port 1194
+proto udp
+dev tun
+ca ca.crt
+cert server.crt
+key server.key
+dh dh.pem
+auth SHA256
+tls-auth ta.key 0
+topology subnet
+server 10.8.0.0 255.255.255.0
+ifconfig-pool-persist /var/log/openvpn/ipp-udp.txt
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 8.8.8.8"
+push "dhcp-option DNS 8.8.4.4"
+keepalive 10 120
+cipher AES-256-GCM
+user nobody
+group nogroup
+persist-key
+persist-tun
+status /var/log/openvpn/openvpn-udp-status.log
+verb 3
+plugin ${PAM_SO} login
+username-as-common-name
+EOF
+
+  cat > "${OVPN_DIR}/server-tcp.conf" << EOF
+port 11940
+proto tcp-server
+dev tun1
+ca ca.crt
+cert server.crt
+key server.key
+dh dh.pem
+auth SHA256
+tls-auth ta.key 0
+topology subnet
+server 10.9.0.0 255.255.255.0
+ifconfig-pool-persist /var/log/openvpn/ipp-tcp.txt
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 8.8.8.8"
+push "dhcp-option DNS 8.8.4.4"
+keepalive 10 120
+cipher AES-256-GCM
+user nobody
+group nogroup
+persist-key
+persist-tun
+status /var/log/openvpn/openvpn-tcp-status.log
+verb 3
+plugin ${PAM_SO} login
+username-as-common-name
+EOF
+
+  sed -i 's/^#*net.ipv4.ip_forward=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+  grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+  sysctl -p > /dev/null 2>&1
+
+  IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+  if [ -n "$IFACE" ]; then
+    iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o "$IFACE" -j MASQUERADE 2>/dev/null || \
+      iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$IFACE" -j MASQUERADE
+    iptables -t nat -C POSTROUTING -s 10.9.0.0/24 -o "$IFACE" -j MASQUERADE 2>/dev/null || \
+      iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o "$IFACE" -j MASQUERADE
+  fi
+  iptables -C INPUT -p udp --dport 1194 -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --dport 1194 -j ACCEPT
+  netfilter-persistent save > /dev/null 2>&1 || true
+
+  systemctl enable openvpn@server openvpn@server-tcp > /dev/null 2>&1
+  systemctl restart openvpn@server openvpn@server-tcp > /dev/null 2>&1
+  echo -e " ${G}[✓] OpenVPN ready on TCP/443 (via sslh -> 11940) & UDP/1194${N}"
+}
+
+generate_ovpn_profile() {
+  local CLIENT_USER="$1"
+  source "$CONFIG_FILE" 2>/dev/null
+  local SERVER_ADDR="${HOST:-$SERVER_IP}"
+  local CA_CERT=$(cat "$OVPN_DIR/ca.crt" 2>/dev/null)
+  local TA_KEY=$(cat "$OVPN_DIR/ta.key" 2>/dev/null)
+
+  cat > "${OVPN_CLIENT_DIR}/${CLIENT_USER}-tcp443.ovpn" << CLIENTTCPEOF
+client
+dev tun
+proto tcp
+remote ${SERVER_ADDR} 443
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+auth SHA256
+cipher AES-256-GCM
+auth-user-pass
+verb 3
+key-direction 1
+
+<ca>
+${CA_CERT}
+</ca>
+
+<tls-auth>
+${TA_KEY}
+</tls-auth>
+CLIENTTCPEOF
+
+  cat > "${OVPN_CLIENT_DIR}/${CLIENT_USER}-udp1194.ovpn" << CLIENTUDPEOF
+client
+dev tun
+proto udp
+remote ${SERVER_ADDR} 1194
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+auth SHA256
+cipher AES-256-GCM
+auth-user-pass
+verb 3
+key-direction 1
+
+<ca>
+${CA_CERT}
+</ca>
+
+<tls-auth>
+${TA_KEY}
+</tls-auth>
+CLIENTUDPEOF
 }
 
 # ══════════════════════════════════════════════
@@ -194,10 +722,6 @@ install_all() {
   echo ""
   echo -e " Installing... Please Wait"
   echo ""
-
-  # Detect Debian/Ubuntu version for compatibility
-  DEBIAN_VER=$(grep -oP '(?<=VERSION_ID=")[^"]+' /etc/os-release 2>/dev/null || echo "12")
-  DEBIAN_CODENAME=$(grep -oP '(?<=VERSION_CODENAME=)[^\n]+' /etc/os-release 2>/dev/null || echo "bookworm")
 
   spin() {
     local pid=$1
@@ -215,10 +739,9 @@ install_all() {
     exec > /dev/null 2>&1
 
     apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      openssh-server curl wget python3 openssl net-tools psmisc > /dev/null 2>&1
+    install_python_deps
+    init_packages_store
 
-    # Completely nuke apache2 — it conflicts with sslh on port 80/443
     systemctl stop apache2 > /dev/null 2>&1
     systemctl disable apache2 > /dev/null 2>&1
     systemctl mask apache2 > /dev/null 2>&1
@@ -229,13 +752,11 @@ install_all() {
     fuser -k 80/tcp > /dev/null 2>&1
     fuser -k 443/tcp > /dev/null 2>&1
 
-    # Remove slipstream if installed — it conflicts with DNSTT on port 53
     systemctl stop slipstream-rust > /dev/null 2>&1
     systemctl disable slipstream-rust > /dev/null 2>&1
     systemctl mask slipstream-rust > /dev/null 2>&1
     rm -f /usr/local/bin/slipstream-server > /dev/null 2>&1
     rm -rf /etc/slipstream-rust > /dev/null 2>&1
-    # Remove iptables redirect if leftover
     IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
     iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 53 -j REDIRECT --to-ports 5300 > /dev/null 2>&1 || true
     iptables -D INPUT -p udp --dport 5300 -j ACCEPT > /dev/null 2>&1 || true
@@ -250,8 +771,7 @@ install_all() {
     sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
     sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 
-    # Add SSH Banner
-    printf "vantricks Script v0.1.1 - Private\n" > /etc/ssh/banner.txt
+    printf "vantricks Script v0.5.0 - Unified SSH/OVPN + Xray WS + Package Manager\n" > /etc/ssh/banner.txt
     sed -i '/^Banner/d' /etc/ssh/sshd_config
     echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
     systemctl enable ssh > /dev/null 2>&1
@@ -259,12 +779,14 @@ install_all() {
 
     install_ssl
     install_nginx
+    sync_host_config
     install_websocket
     install_dnstt
+    install_openvpn
     install_v2ray_auto
     install_custom_openssh
 
-    cp "$(realpath $0)" /root/vantricks-script.sh
+    cp "$(realpath "$0")" /root/vantricks-script.sh
     chmod +x /root/vantricks-script.sh
     echo "#!/bin/bash" > /usr/local/bin/menu
     echo "sudo bash /root/vantricks-script.sh" >> /usr/local/bin/menu
@@ -274,7 +796,6 @@ install_all() {
 
   echo ""
 
-  # Install MOTD (auto show info on login)
   cat > /etc/profile.d/vantricks-motd.sh << 'MOTDEOF'
 #!/bin/bash
 CONFIG_FILE="/etc/vantricks_script.conf"
@@ -285,15 +806,8 @@ if [ -f "$CONFIG_FILE" ]; then
   C='\033[0;36m'
   W='\033[1;37m'
   N='\033[0m'
-  DIV="════════════════════════════════════════════════"
 
   SERVER_IP=$(hostname -I | awk '{print $1}')
-
-  if [ "$PUBKEY_TYPE" == "random" ]; then
-    PUB_KEY=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
-  else
-    PUB_KEY=$PUBKEY
-  fi
 
   svc_sslh() {
     S1=$(systemctl is-active sslh 2>/dev/null)
@@ -301,25 +815,25 @@ if [ -f "$CONFIG_FILE" ]; then
     if [ "$S1" == "active" ] || [ "$S2" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
   }
   svc() {
-    STATUS=$(systemctl is-active $1 2>/dev/null)
+    STATUS=$(systemctl is-active "$1" 2>/dev/null)
     if [ "$STATUS" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
   }
 
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${W}            ⚡ PORTS INFORMATION ⚡                ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  printf " %-20s %s\n" "SSH:"              "22, 80, 443"
-  printf " %-20s %s\n" "SSH + WS:"         "80, 443, 8080"
-  printf " %-20s %s\n" "SSH + SSL:"        "443"
-  printf " %-20s %s\n" "SSH + WS + SSL:"   "443"
-  printf " %-20s %s\n" "DNSTT:"            "80, 443"
-  printf " %-20s %s\n" "WEBSOCKET:"        "8080"
-  printf " %-20s %s\n" "XRAY + WS:"        "80, 443"
-  printf " %-20s %s\n" "XRAY + WS + TLS:"  "80, 443"
+  printf " %-22s %s\n" "SSH:"               "22, 80, 443"
+  printf " %-22s %s\n" "SSH + WS:"          "80, 443, 8080"
+  printf " %-22s %s\n" "OPENVPN TCP/UDP:"   "443 (TCP), 1194 (UDP)"
+  printf " %-22s %s\n" "DNSTT:"             "53 (80, 443)"
+  printf " %-22s %s\n" "WEBSOCKET:"         "8080"
+  printf " %-22s %s\n" "XRAY WS / TROJAN:"  "80, 443"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${W}            ⚡ SERVICES STATUS ⚡                  ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e " SSH            - $(svc ssh)"
+  echo -e " OVPN UDP       - $(svc openvpn@server)"
+  echo -e " OVPN TCP/443   - $(svc openvpn@server-tcp)"
   echo -e " SSL            - $(svc stunnel4)"
   echo -e " MULTIPLEXER    - $(svc_sslh)"
   echo -e " NGINX          - $(svc nginx)"
@@ -338,21 +852,20 @@ fi
 MOTDEOF
   chmod +x /etc/profile.d/vantricks-motd.sh
   echo -e " ${G}[✓] Login info screen installed!${N}"
+
   cat > /usr/local/bin/vantricks-startup.sh << 'STARTEOF'
 #!/bin/bash
-# Kill anything on port 80/443 (apache2 etc)
 systemctl stop apache2 > /dev/null 2>&1
 systemctl mask apache2 > /dev/null 2>&1
 fuser -k 80/tcp > /dev/null 2>&1
 fuser -k 443/tcp > /dev/null 2>&1
-# Fix DNS
 chattr -i /etc/resolv.conf > /dev/null 2>&1
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
 echo "nameserver 8.8.4.4" >> /etc/resolv.conf
 chattr +i /etc/resolv.conf > /dev/null 2>&1
-# Restart services in order
 sleep 3
 systemctl restart ssh > /dev/null 2>&1
+systemctl restart openvpn@server openvpn@server-tcp > /dev/null 2>&1
 systemctl restart stunnel4 > /dev/null 2>&1
 systemctl restart nginx > /dev/null 2>&1
 systemctl restart ws-proxy-8080 > /dev/null 2>&1
@@ -385,9 +898,8 @@ SVCEOF
   systemctl restart stunnel4 > /dev/null 2>&1
   systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
   systemctl restart xray > /dev/null 2>&1
-  sleep 8
+  sleep 5
 
-  # Show summary screen and wait
   show_summary
   read -p " Press Enter to reboot... "
 
@@ -408,11 +920,12 @@ SVCEOF
 # ══════════════════════════════════════════════
 
 show_summary() {
-  source "$CONFIG_FILE"
+  source "$CONFIG_FILE" 2>/dev/null
   SERVER_IP=$(hostname -I | awk '{print $1}')
+  [ -z "$HOST" ] && HOST="$SERVER_IP"
 
   svc_status() {
-    STATUS=$(systemctl is-active $1 2>/dev/null)
+    STATUS=$(systemctl is-active "$1" 2>/dev/null)
     if [ "$STATUS" == "active" ]; then echo -e "${G}●${N}"; else echo -e "${R}●${N}"; fi
   }
 
@@ -426,24 +939,24 @@ show_summary() {
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${W}            ⚡ PORTS INFORMATION ⚡                ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  printf " %-20s %s\n" "SSH:"              "22, 80, 443"
-  printf " %-20s %s\n" "SSH + WS:"         "80, 443, 8080"
-  printf " %-20s %s\n" "SSH + SSL:"        "443"
-  printf " %-20s %s\n" "SSH + WS + SSL:"   "443"
-  printf " %-20s %s\n" "DNSTT:"            "80, 443"
-  printf " %-20s %s\n" "WEBSOCKET:"        "8080"
-  printf " %-20s %s\n" "XRAY + WS:"        "80, 443"
-  printf " %-20s %s\n" "XRAY + WS + TLS:"  "80, 443"
+  printf " %-22s %s\n" "SSH:"               "22, 80, 443"
+  printf " %-22s %s\n" "SSH + WS:"          "80, 443, 8080"
+  printf " %-22s %s\n" "OPENVPN TCP/UDP:"   "443 (TCP), 1194 (UDP)"
+  printf " %-22s %s\n" "DNSTT:"             "53 (80, 443)"
+  printf " %-22s %s\n" "WEBSOCKET:"         "8080"
+  printf " %-22s %s\n" "XRAY WS / TROJAN:"  "80, 443"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${W}            ⚡ SERVICES STATUS ⚡                  ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e " SSH            - $(svc_status ssh)"
+  echo -e " OVPN UDP       - $(svc_status openvpn@server)"
+  echo -e " OVPN TCP/443   - $(svc_status openvpn@server-tcp)"
   echo -e " SSL            - $(svc_status stunnel4)"
   echo -e " MULTIPLEXER    - $(svc_status_sslh)"
   echo -e " NGINX          - $(svc_status nginx)"
   echo -e " DNSTT          - $(svc_status dnstt)"
   echo -e " WEBSOCKET 8080 - $(svc_status ws-proxy-8080)"
-  echo -e " XRAY          - $(svc_status xray)"
+  echo -e " XRAY           - $(svc_status xray)"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e " IP         : ${G}$SERVER_IP${N}"
   echo -e " Host       : ${G}$HOST${N}"
@@ -456,15 +969,18 @@ show_summary() {
 }
 
 # ══════════════════════════════════════════════
-#   WEBSOCKET PROXY INSTALL
+#   WEBSOCKET PROXY INSTALL (PYTHON 3)
 # ══════════════════════════════════════════════
 
 install_websocket() {
-  echo -e " ${Y}[*] Installing WebSocket proxy (port 8080)...${N}"
+  echo -e " ${Y}[*] Installing Python WebSocket proxy (port 8080)...${N}"
 
   cat > /usr/local/bin/ws-proxy.py << 'PYEOF'
 #!/usr/bin/env python3
-import socket, threading, select, sys
+import socket
+import threading
+import select
+import sys
 
 LISTEN_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 SSH_HOST = '127.0.0.1'
@@ -473,8 +989,7 @@ NGINX_PORT = 8880
 BUFFER = 65535
 TIMEOUT = 60
 
-# V2Ray WS paths - forward to nginx
-V2RAY_PATHS = [b'/vmess', b'/vless', b'/trojan']
+V2RAY_PATHS = (b'/vmess', b'/vless', b'/trojan')
 
 RESPONSE_COLOR = (
     b"HTTP/1.1 101 <font color=#FF0000>vantricks</font>\r\n"
@@ -503,13 +1018,14 @@ def forward(src, dst):
                 if not d:
                     break
                 dst.sendall(d)
-    except:
+    except Exception:
         pass
     finally:
-        try: src.close()
-        except: pass
-        try: dst.close()
-        except: pass
+        for sock in (src, dst):
+            try:
+                sock.close()
+            except Exception:
+                pass
 
 def handle(client):
     try:
@@ -518,44 +1034,35 @@ def handle(client):
             client.close()
             return
 
-        # Check if it's a V2Ray WS path - forward to nginx
-        is_v2ray = False
-        is_http = data[:4] in (b'GET ', b'POST', b'HEAD', b'CONN')
-        is_websocket = b'Upgrade: websocket' in data or b'upgrade: websocket' in data
-
-        if is_http:
-            for path in V2RAY_PATHS:
-                if path in data:
-                    is_v2ray = True
-                    break
+        lower_data = data.lower()
+        is_http = data[:4] in (b'GET ', b'POST', b'HEAD', b'CONN', b'PUT ', b'OPTI') or b'host:' in lower_data
+        is_websocket = b'upgrade: websocket' in lower_data
+        is_v2ray = is_http and any(path in data for path in V2RAY_PATHS)
 
         if is_v2ray:
-            # Forward to nginx for V2Ray
             target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             target.connect((SSH_HOST, NGINX_PORT))
             target.sendall(data)
             threading.Thread(target=forward, args=(client, target), daemon=True).start()
             threading.Thread(target=forward, args=(target, client), daemon=True).start()
         elif is_http and not is_websocket:
-            # Plain HTTP - always send plain response for response checkers
             client.send(RESPONSE_PLAIN)
             client.close()
             return
         else:
-            # SSH with or without payload
             target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             target.connect((SSH_HOST, SSH_PORT))
             if is_http:
-                # HTTP payload with websocket - send colored 101 response then tunnel
                 client.send(RESPONSE_COLOR)
             else:
-                # Raw SSH - forward data directly
                 target.sendall(data)
             threading.Thread(target=forward, args=(client, target), daemon=True).start()
             threading.Thread(target=forward, args=(target, client), daemon=True).start()
-    except:
-        try: client.close()
-        except: pass
+    except Exception:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 def start(port):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -566,7 +1073,7 @@ def start(port):
         try:
             c, _ = srv.accept()
             threading.Thread(target=handle, args=(c,), daemon=True).start()
-        except:
+        except Exception:
             pass
 
 if __name__ == '__main__':
@@ -597,88 +1104,32 @@ EOF
 }
 
 # ══════════════════════════════════════════════
-#   NGINX INSTALL (V2Ray reverse proxy)
+#   NGINX INSTALL (Xray VMess/VLESS/Trojan WS)
 # ══════════════════════════════════════════════
 
 install_nginx() {
   echo -e " ${Y}[*] Installing Nginx reverse proxy...${N}"
   DEBIAN_FRONTEND=noninteractive apt-get install -y nginx > /dev/null 2>&1
-
-  # Remove default config
   rm -f /etc/nginx/sites-enabled/default 2>/dev/null
-
-  # Nginx on 8880 routes V2Ray paths and WS
-  cat > /etc/nginx/conf.d/v2ray.conf << 'NGINXEOF'
-server {
-    listen 8880;
-    server_name _;
-
-    location /vmess {
-        proxy_pass http://127.0.0.1:10086;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_read_timeout 86400;
-    }
-
-    location /vless {
-        proxy_pass http://127.0.0.1:10087;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_read_timeout 86400;
-    }
-
-    location /trojan {
-        proxy_pass http://127.0.0.1:10088;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_read_timeout 86400;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_read_timeout 86400;
-        add_header Upgrade "websocket" always;
-        add_header Connection "Upgrade" always;
-        add_header Sec-WebSocket-Version "13" always;
-        add_header Via "vantricks-SSH" always;
-    }
-}
-NGINXEOF
-
-  # Remove default nginx site
-  rm -f /etc/nginx/sites-enabled/default 2>/dev/null
-
+  sync_host_config
   systemctl enable nginx > /dev/null 2>&1
   systemctl restart nginx > /dev/null 2>&1
   echo -e " ${G}[✓] Nginx reverse proxy running on port 8880${N}"
 }
 
-
+# ══════════════════════════════════════════════
+#   XRAY / V2RAY INSTALL (VMess + VLESS + Trojan WS)
+# ══════════════════════════════════════════════
 
 install_v2ray_auto() {
-  echo -e " ${Y}[*] Installing Xray...${N}"
+  echo -e " ${Y}[*] Installing Xray (VMess, VLESS, Trojan over WebSocket)...${N}"
 
-  # Install Xray using official script
   bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
 
   mkdir -p /usr/local/etc/xray /etc/xray
-  touch /etc/xray/accounts.db
+  touch "$XRAY_DB"
 
-  # Write config - only VMess to keep it simple and stable
-  cat > /usr/local/etc/xray/config.json << CFGEOF
+  cat > "$XRAY_CONF" << CFGEOF
 {
   "log": {
     "loglevel": "warning"
@@ -736,48 +1187,33 @@ install_v2ray_auto() {
 }
 CFGEOF
 
-  echo -e " ${G}[✓] V2Ray config written${N}"
-
   systemctl daemon-reload > /dev/null 2>&1
   systemctl enable xray > /dev/null 2>&1
   systemctl restart xray > /dev/null 2>&1
-  sleep 3
-
-  if systemctl is-active --quiet xray; then
-    echo -e " ${G}[✓] V2Ray/Xray installed and running!${N}"
-  else
-    echo -e " ${R}[!] V2Ray failed - check: journalctl -u xray -n 20${N}"
-  fi
+  sleep 2
 }
 
 # ══════════════════════════════════════════════
-#   SSL INSTALL (STUNNEL + SSLH)
+#   SSL INSTALL (STUNNEL + SSLH with Proxified DNS Fallback)
 # ══════════════════════════════════════════════
 
 install_ssl() {
-  echo -e " ${Y}[*] Installing SSL + Multiplexer on ports 80, 443...${N}"
+  echo -e " ${Y}[*] Installing SSL + Multiplexer (Proxified DNS compatible)...${N}"
 
-  # Install stunnel — package name same across versions
   DEBIAN_FRONTEND=noninteractive apt-get install -y stunnel4 > /dev/null 2>&1
-
-  # Install sslh
   echo "sslh sslh/inetd_or_standalone select standalone" | debconf-set-selections
   DEBIAN_FRONTEND=noninteractive apt-get install -y sslh > /dev/null 2>&1
 
-  # Generate SSL cert — try Let's Encrypt first, fallback to self-signed
   mkdir -p /etc/stunnel
   CERT_OBTAINED=false
 
-  # Try Let's Encrypt using the HOST domain
   if [ -n "$HOST" ]; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y certbot > /dev/null 2>&1
-    # Temporarily free port 80 for certbot standalone
     fuser -k 80/tcp > /dev/null 2>&1
     sleep 1
     if certbot certonly --standalone -d "$HOST" \
       --non-interactive --agree-tos -m "admin@${HOST}" \
       --http-01-port 80 > /dev/null 2>&1; then
-      # Use Let's Encrypt cert in stunnel
       cat > /etc/stunnel/stunnel.conf << EOF
 cert = /etc/letsencrypt/live/${HOST}/fullchain.pem
 key = /etc/letsencrypt/live/${HOST}/privkey.pem
@@ -791,20 +1227,21 @@ accept = 127.0.0.1:7443
 connect = 127.0.0.1:8080
 EOF
       CERT_OBTAINED=true
-      echo -e " ${G}[✓] Let's Encrypt SSL certificate obtained for $HOST${N}"
     fi
   fi
 
-  # Fallback to self-signed if Let's Encrypt failed
   if [ "$CERT_OBTAINED" = false ]; then
+    CN_HOST="${HOST:-vantricks}"
     openssl req -new -x509 -days 3650 -nodes \
       -out /etc/stunnel/stunnel.pem \
       -keyout /etc/stunnel/stunnel.pem \
-      -subj "/CN=vantricks" > /dev/null 2>&1
+      -subj "/CN=${CN_HOST}" \
+      -addext "subjectAltName=DNS:${CN_HOST}" > /dev/null 2>&1 || \
+    openssl req -new -x509 -days 3650 -nodes \
+      -out /etc/stunnel/stunnel.pem \
+      -keyout /etc/stunnel/stunnel.pem \
+      -subj "/CN=${CN_HOST}" > /dev/null 2>&1
     chmod 600 /etc/stunnel/stunnel.pem
-    echo -e " ${Y}[!] Using self-signed cert (Let's Encrypt failed)${N}"
-
-    # Write stunnel config with self-signed cert
     cat > /etc/stunnel/stunnel.conf << 'EOF'
 cert = /etc/stunnel/stunnel.pem
 socket = a:SO_REUSEADDR=1
@@ -818,7 +1255,6 @@ connect = 127.0.0.1:8080
 EOF
   fi
 
-  # Stunnel systemd service
   rm -rf /etc/systemd/system/stunnel4.service.d/ 2>/dev/null
   cat > /etc/systemd/system/stunnel4.service << 'SEOF'
 [Unit]
@@ -835,7 +1271,6 @@ RestartSec=5
 WantedBy=multi-user.target
 SEOF
 
-  # Enable stunnel
   sed -i '/^ENABLED/d' /etc/default/stunnel4 2>/dev/null
   echo "ENABLED=1" >> /etc/default/stunnel4
   systemctl daemon-reload > /dev/null 2>&1
@@ -843,14 +1278,11 @@ SEOF
   systemctl restart stunnel4 > /dev/null 2>&1
   sleep 2
 
-  # SSLH: multiplexer on 80 and 443
-  # Detect sslh version — 1.x uses CLI args, 2.x uses config file
   SSLH_VER=$(sslh -V 2>&1 | grep -oP '\d+' | head -1)
   mkdir -p /var/run/sslh /etc/sslh
   chown sslh:sslh /var/run/sslh 2>/dev/null || true
 
   if [ "${SSLH_VER}" -ge 2 ] 2>/dev/null; then
-    # sslh 2.x — use config file
     cat > /etc/sslh/sslh.cfg << 'EOF'
 foreground: true;
 inetd: false;
@@ -868,17 +1300,17 @@ listen:
 
 protocols:
 (
-  { name: "ssh";     host: "127.0.0.1"; port: "22";   log_level: 0; },
-  { name: "tls";     host: "127.0.0.1"; port: "7443"; log_level: 0; },
-  { name: "http";    host: "127.0.0.1"; port: "8880"; log_level: 0; },
-  { name: "anyprot"; host: "127.0.0.1"; port: "8080"; log_level: 0; }
+  { name: "ssh";     host: "127.0.0.1"; port: "22";    log_level: 0; },
+  { name: "tls";     host: "127.0.0.1"; port: "7443";  log_level: 0; },
+  { name: "http";    host: "127.0.0.1"; port: "8880";  log_level: 0; },
+  { name: "anyprot"; host: "127.0.0.1"; port: "11940"; log_level: 0; }
 );
 EOF
     cat > /etc/systemd/system/sslh.service << 'SSLHEOF'
 [Unit]
-Description=SSL/SSH Multiplexer
-After=network.target ssh.service stunnel4.service nginx.service
-Wants=ssh.service stunnel4.service nginx.service
+Description=SSL/SSH/OVPN Multiplexer
+After=network.target ssh.service stunnel4.service nginx.service openvpn@server-tcp.service
+Wants=ssh.service stunnel4.service nginx.service openvpn@server-tcp.service
 
 [Service]
 Type=simple
@@ -891,12 +1323,11 @@ RestartSec=5
 WantedBy=multi-user.target
 SSLHEOF
   else
-    # sslh 1.x — use command line args
     cat > /etc/systemd/system/sslh.service << 'SSLHEOF'
 [Unit]
-Description=SSL/SSH Multiplexer
-After=network.target ssh.service stunnel4.service nginx.service
-Wants=ssh.service stunnel4.service nginx.service
+Description=SSL/SSH/OVPN Multiplexer
+After=network.target ssh.service stunnel4.service nginx.service openvpn@server-tcp.service
+Wants=ssh.service stunnel4.service nginx.service openvpn@server-tcp.service
 
 [Service]
 Type=simple
@@ -907,7 +1338,7 @@ ExecStart=/usr/sbin/sslh -f \
   --ssh 127.0.0.1:22 \
   --tls 127.0.0.1:7443 \
   --http 127.0.0.1:8880 \
-  --anyprot 127.0.0.1:8080
+  --anyprot 127.0.0.1:11940
 Restart=on-failure
 RestartSec=5
 
@@ -921,15 +1352,11 @@ SSLHEOF
   fi
   systemctl daemon-reload > /dev/null 2>&1
   systemctl enable sslh > /dev/null 2>&1
-  # Make sure ports are free before starting sslh
   fuser -k 80/tcp > /dev/null 2>&1
   fuser -k 443/tcp > /dev/null 2>&1
   sleep 2
   systemctl restart sslh > /dev/null 2>&1
-  sleep 3
-
-  echo -e " ${G}[✓] Stunnel: port 7443(SSH-SSL) port 444(WS-SSL)${N}"
-  echo -e " ${G}[✓] SSLH multiplexer on ports 80, 443${N}"
+  sleep 2
 }
 
 # ══════════════════════════════════════════════
@@ -939,14 +1366,12 @@ SSLHEOF
 install_dnstt() {
   echo -e " ${Y}[*] Installing DNSTT...${N}"
 
-  # Install latest Go
   GO_VER="1.22.5"
   wget -q "https://go.dev/dl/go${GO_VER}.linux-amd64.tar.gz" -O /tmp/go.tar.gz 2>/dev/null
   rm -rf /usr/local/go
   tar -C /usr/local -xzf /tmp/go.tar.gz > /dev/null 2>&1
   export PATH=$PATH:/usr/local/go/bin
 
-  # Download and build dnstt
   apt-get install -y unzip > /dev/null 2>&1
   wget -q "https://www.bamsoftware.com/software/dnstt/dnstt-20220208.zip" -O /tmp/dnstt.zip 2>/dev/null
   cd /tmp && unzip -o dnstt.zip > /dev/null 2>&1
@@ -955,22 +1380,18 @@ install_dnstt() {
   cp dnstt-server /usr/local/bin/dnstt-server
   chmod +x /usr/local/bin/dnstt-server
 
-  # Generate keypair
   /usr/local/bin/dnstt-server -gen-key -privkey-file /etc/dnstt-priv.key -pubkey-file /etc/dnstt-pub.key > /dev/null 2>&1
 
-  # Save pubkey to config
   DNSTT_PUBKEY=$(cat /etc/dnstt-pub.key 2>/dev/null | tr -d '\n' || echo "N/A")
   sed -i '/^DNSTT_PUBKEY/d' "$CONFIG_FILE"
   echo "DNSTT_PUBKEY=$DNSTT_PUBKEY" >> "$CONFIG_FILE"
 
-  # Create startup script — DNSTT on port 53
   cat > /usr/local/bin/dnstt-start.sh << EOF
 #!/bin/bash
 exec /usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/dnstt-priv.key ${NAMESERVER} 127.0.0.1:22
 EOF
   chmod +x /usr/local/bin/dnstt-start.sh
 
-  # Create systemd service
   cat > /etc/systemd/system/dnstt.service << 'EOF'
 [Unit]
 Description=DNSTT DNS Tunnel Server
@@ -985,28 +1406,17 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-  # Free port 53 from systemd-resolved
   systemctl stop systemd-resolved > /dev/null 2>&1
   systemctl disable systemd-resolved > /dev/null 2>&1
 
-  # Make DNS persistent across reboots
   rm -f /etc/resolv.conf
   echo "nameserver 8.8.8.8" > /etc/resolv.conf
   echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-  # Lock the file so systemd-resolved can't overwrite it
   chattr +i /etc/resolv.conf 2>/dev/null || true
 
   systemctl daemon-reload > /dev/null 2>&1
   systemctl enable dnstt > /dev/null 2>&1
   systemctl start dnstt > /dev/null 2>&1
-
-  # Check if started
-  sleep 2
-  if systemctl is-active --quiet dnstt; then
-    echo -e " ${G}[✓] DNSTT running on port 53${N}"
-  else
-    echo -e " ${Y}[!] DNSTT installed but may need DNS record setup${N}"
-  fi
 }
 
 install_custom_openssh() {
@@ -1015,30 +1425,26 @@ install_custom_openssh() {
     libselinux1-dev libedit-dev autoconf > /dev/null 2>&1
 
   OPENSSH_VER="9.2p1"
-  cd /tmp
+  cd /tmp || return
   wget -q "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VER}.tar.gz" -O openssh-src.tar.gz 2>/dev/null
   tar -xzf openssh-src.tar.gz > /dev/null 2>&1
-  cd openssh-${OPENSSH_VER}
+  cd "openssh-${OPENSSH_VER}" || return
 
-  # Patch version string
   sed -i 's/#define SSH_VERSION.*/#define SSH_VERSION "vantricks-SSH"/' version.h
   sed -i 's/#define SSH_PORTABLE.*/#define SSH_PORTABLE ""/' version.h
 
   ./configure --prefix=/usr --sysconfdir=/etc/ssh --with-pam > /dev/null 2>&1
-  make -j$(nproc) > /dev/null 2>&1
+  make -j"$(nproc)" > /dev/null 2>&1
 
-  # Stop ssh before replacing binary to avoid "Text file busy"
   systemctl stop ssh > /dev/null 2>&1
   systemctl stop sshd > /dev/null 2>&1
   install -m 755 sshd /usr/sbin/sshd
 
-  # Create required dirs and sshd user for privilege separation
   mkdir -p /var/empty /run/sshd
   chown root:root /var/empty
   chmod 755 /var/empty
   useradd -r -s /sbin/nologin -d /var/empty sshd > /dev/null 2>&1 || true
 
-  # Fix systemd service to use -D flag (foreground) with Type=simple
   cat > /etc/systemd/system/ssh.service << 'SVCEOF'
 [Unit]
 Description=vantricks-SSH Server
@@ -1059,83 +1465,44 @@ SVCEOF
   systemctl enable ssh > /dev/null 2>&1
   systemctl start ssh > /dev/null 2>&1
 
-  cd /tmp && rm -rf openssh-${OPENSSH_VER} openssh-src.tar.gz
-  echo -e " ${G}[✓] vantricks-SSH installed!${N}"
+  cd /tmp && rm -rf "openssh-${OPENSSH_VER}" openssh-src.tar.gz
 }
 
+# ══════════════════════════════════════════════
+#   MAIN MENU
+# ══════════════════════════════════════════════
+
 main_menu() {
-  # Auto-fix apache2 if running — kills multiplexer
-  systemctl stop apache2 > /dev/null 2>&1
-  systemctl disable apache2 > /dev/null 2>&1
-  systemctl mask apache2 > /dev/null 2>&1
-  if systemctl is-active apache2 > /dev/null 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y apache2 apache2-* > /dev/null 2>&1
-    fuser -k 80/tcp > /dev/null 2>&1
-    fuser -k 443/tcp > /dev/null 2>&1
-    systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
-  fi
-
-  # Install vantricks-startup service if missing (for old servers)
-  if [ ! -f /etc/systemd/system/vantricks-startup.service ]; then
-    cat > /usr/local/bin/vantricks-startup.sh << 'STARTEOF'
-#!/bin/bash
-systemctl stop apache2 > /dev/null 2>&1
-systemctl mask apache2 > /dev/null 2>&1
-fuser -k 80/tcp > /dev/null 2>&1
-fuser -k 443/tcp > /dev/null 2>&1
-chattr -i /etc/resolv.conf > /dev/null 2>&1
-echo "nameserver 8.8.8.8" > /etc/resolv.conf
-echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-chattr +i /etc/resolv.conf > /dev/null 2>&1
-sleep 3
-systemctl restart ssh > /dev/null 2>&1
-systemctl restart stunnel4 > /dev/null 2>&1
-systemctl restart nginx > /dev/null 2>&1
-systemctl restart ws-proxy-8080 > /dev/null 2>&1
-sleep 3
-systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
-systemctl restart xray > /dev/null 2>&1
-systemctl restart dnstt > /dev/null 2>&1
-STARTEOF
-    chmod +x /usr/local/bin/vantricks-startup.sh
-    cat > /etc/systemd/system/vantricks-startup.service << 'SVCEOF'
-[Unit]
-Description=vantricks Script Startup
-After=network.target network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/vantricks-startup.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-SVCEOF
-    systemctl daemon-reload > /dev/null 2>&1
-    systemctl enable vantricks-startup > /dev/null 2>&1
-  fi
-
   while true; do
     auto_remove_expired
+    sync_host_config
     get_info
-    source "$CONFIG_FILE" 2>/dev/null
     clear
-    # Service status inline
+
     SSH_S=$(systemctl is-active ssh 2>/dev/null)
     [ "$SSH_S" != "active" ] && SSH_S=$(systemctl is-active sshd 2>/dev/null)
+    OVPN_U_S=$(systemctl is-active openvpn@server 2>/dev/null)
+    OVPN_T_S=$(systemctl is-active openvpn@server-tcp 2>/dev/null)
     SSL_S=$(systemctl is-active stunnel4 2>/dev/null)
     MUX_S1=$(systemctl is-active sslh 2>/dev/null)
     MUX_S2=$(systemctl is-active sslh-select 2>/dev/null)
     WS_S=$(systemctl is-active ws-proxy-8080 2>/dev/null)
     XRAY_S=$(systemctl is-active xray 2>/dev/null)
     NGX_S=$(systemctl is-active nginx 2>/dev/null)
+
     [ "$SSH_S" == "active" ]  && SSH_DOT="${G}ON${N}"  || SSH_DOT="${R}OFF${N}"
+    ( [ "$OVPN_U_S" == "active" ] || [ "$OVPN_T_S" == "active" ] ) && OVPN_DOT="${G}ON${N}" || OVPN_DOT="${R}OFF${N}"
     [ "$SSL_S" == "active" ]  && SSL_DOT="${G}ON${N}"  || SSL_DOT="${R}OFF${N}"
     ( [ "$MUX_S1" == "active" ] || [ "$MUX_S2" == "active" ] ) && MUX_DOT="${G}ON${N}" || MUX_DOT="${R}OFF${N}"
     [ "$WS_S" == "active" ]   && WS_DOT="${G}ON${N}"   || WS_DOT="${R}OFF${N}"
     [ "$XRAY_S" == "active" ] && XRAY_DOT="${G}ON${N}" || XRAY_DOT="${R}OFF${N}"
     [ "$NGX_S" == "active" ]  && NGX_DOT="${G}ON${N}"  || NGX_DOT="${R}OFF${N}"
+
+    if [ "${PKG_COUNT:-0}" -gt 0 ]; then
+      PKG_STATUS_DISP="${G}${PKG_COUNT} Active${N}"
+    else
+      PKG_STATUS_DISP="${R}NONE${N}"
+    fi
 
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
     echo -e "${C}║${N}        ${W}Vantricks VPS Manager${N}                    ${C}║${N}"
@@ -1146,31 +1513,35 @@ SVCEOF
     echo -e "${C}║${N} ${Y}●${N} Time     : ${W}$DATETIME${N}"
     echo -e "${C}║${N} ${Y}●${N} IP VPS   : ${W}$SERVER_IP${N}"
     echo -e "${C}║${N} ${Y}●${N} Domain   : ${W}$HOST${N}"
+    echo -e "${C}║${N} ${Y}●${N} Packages : $PKG_STATUS_DISP"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}         ${W}❱❱ ACCOUNT INFORMATION ❰❰${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${C}SSH/WS/SSL ${N}: ${G}$SSH_ACCOUNTS${N}   ${C}XRAY     ${N}: ${G}$V2RAY_ACCOUNTS${N}"
-    echo -e "${C}║${N}  ${C}SSH Online ${N}: ${G}$SSH_ONLINE${N}   ${C}Total    ${N}: ${G}$TOTAL_ACCOUNTS${N}"
+    echo -e "${C}║${N}  ${C}SSH+OVPN   ${N}: ${G}$SSH_ACCOUNTS${N}   ${C}XRAY     ${N}: ${G}$V2RAY_ACCOUNTS${N}"
+    echo -e "${C}║${N}  ${C}SSH Online ${N}: ${G}$SSH_ONLINE${N}   ${C}OVPN On  ${N}: ${G}$OVPN_ONLINE${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}          ${W}❱❱ SERVICES STATUS ❰❰${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  SSH         : $SSH_DOT       SSL         : $SSL_DOT"
-    echo -e "${C}║${N}  MULTIPLEXER : $MUX_DOT       NGINX       : $NGX_DOT"
-    echo -e "${C}║${N}  WEBSOCKET   : $WS_DOT       XRAY        : $XRAY_DOT"
+    echo -e "${C}║${N}  SSH         : $SSH_DOT       OPENVPN     : $OVPN_DOT"
+    echo -e "${C}║${N}  SSL         : $SSL_DOT       MULTIPLEXER : $MUX_DOT"
+    echo -e "${C}║${N}  WEBSOCKET   : $WS_DOT       NGINX       : $NGX_DOT"
+    echo -e "${C}║${N}  XRAY        : $XRAY_DOT"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e "${C}║${N}            ${W}❱❱ MAIN MENU ❰❰${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[1]${N} SSH Management    ${W}[4]${N} Restart Services"
-    echo -e "${C}║${N}  ${W}[2]${N} V2Ray Management   ${W}[5]${N} Server Info"
-    echo -e "${C}║${N}  ${W}[3]${N} Services Status   ${W}[0]${N} Exit"
+    echo -e "${C}║${N}  ${W}[1]${N} SSH + OVPN Menu    ${W}[4]${N} Restart Services"
+    echo -e "${C}║${N}  ${W}[2]${N} V2Ray/Xray Menu    ${W}[5]${N} Server Info"
+    echo -e "${C}║${N}  ${W}[3]${N} Services Status    ${W}[6]${N} Package Manager"
+    echo -e "${C}║${N}  ${W}[0]${N} Exit                                      ${C}║${N}"
     echo -e "${C}╚══════════════════════════════════════════════╝${N}"
     read -p " Option >>> " OPT
     case $OPT in
-      1) ssh_menu ;;
+      1) ssh_ovpn_menu ;;
       2) v2ray_menu ;;
       3) check_services ;;
       4) restart_services ;;
       5) show_summary; press_enter ;;
+      6) package_menu ;;
       0) clear; exit 0 ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
     esac
@@ -1178,43 +1549,41 @@ SVCEOF
 }
 
 # ══════════════════════════════════════════════
-#   SSH MENU
+#   SSH + OVPN UNIFIED MENU
 # ══════════════════════════════════════════════
 
-ssh_menu() {
+ssh_ovpn_menu() {
   while true; do
     clear
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-    echo -e "${C}║${N}           ${W}SSH MANAGEMENT${N}                   ${C}║${N}"
+    echo -e "${C}║${N}        ${W}SSH + OPENVPN MANAGEMENT${N}              ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[1]${N} Create Account                       ${C}║${N}"
-    echo -e "${C}║${N}  ${W}[2]${N} Delete Account                       ${C}║${N}"
-    echo -e "${C}║${N}  ${W}[3]${N} Check Account                        ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} Create Account (SSH + OVPN TCP/UDP)  ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[2]${N} Delete Account (SSH + OVPN)          ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[3]${N} Check Account & .OVPN Paths          ${C}║${N}"
     echo -e "${C}║${N}  ${W}[4]${N} List All Accounts                    ${C}║${N}"
     echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                    ${C}║${N}"
     echo -e "${C}╚══════════════════════════════════════════════╝${N}"
     read -p " Option >>> " OPT
     case $OPT in
-      1) create_user ;;
-      2) remove_user ;;
-      3) check_user ;;
-      4) list_users ;;
+      1) create_ssh_ovpn_user ;;
+      2) remove_ssh_ovpn_user ;;
+      3) check_ssh_ovpn_user ;;
+      4) list_ssh_ovpn_users ;;
       0) break ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
     esac
   done
 }
 
-# ══════════════════════════════════════════════
-#   CREATE USER
-# ══════════════════════════════════════════════
-
-create_user() {
-  source "$CONFIG_FILE"
+create_ssh_ovpn_user() {
+  verify_package_gate || return
+  sync_host_config
+  SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
   clear
   DATETIME=$(TZ="Asia/Manila" date "+%m-%d-%Y %I:%M:%S %p")
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-  echo -e "${C}║${N}           ${W}CREATE SSH ACCOUNT${N}               ${C}║${N}"
+  echo -e "${C}║${N}     ${W}CREATE UNIFIED SSH + OVPN ACCOUNT${N}        ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Time : ${G}$DATETIME${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
@@ -1225,6 +1594,11 @@ create_user() {
 
   if [ -z "$NEW_USER" ] || [ -z "$NEW_PASS" ] || [ -z "$EXP_DAYS" ]; then
     echo -e " ${R}[!] All fields are required!${N}"
+    sleep 2; return
+  fi
+
+  if ! [[ "$NEW_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    echo -e " ${R}[!] Invalid username format (use lowercase letters/numbers/_/-)!${N}"
     sleep 2; return
   fi
 
@@ -1248,9 +1622,14 @@ create_user() {
   fi
   systemctl restart ssh > /dev/null 2>&1
 
+  generate_ovpn_profile "$NEW_USER"
+
+  PAYLOAD_1='GET / HTTP/1.1[crlf]Host: api.mypocketdoctor.com[crlf][crlf][crlf][crlf][instant_split][crlf][crlf]X / HTTP/1.2[crlf]Host: api.mypocketdoctor.com[crlf][lf][crlf]GET / HTTP/1.1[crlf]Host: points.digitulz.cloud[crlf]Upgrade: websocket[crlf]Connection: >Upgrade[crlf][crlf]'
+  PAYLOAD_2="GET / HTTP/1.1[crlf]Host: ${HOST}[crlf][crlf][crlf][crlf][split][crlf][crlf]X / HTTP/1.2[crlf]Host: ${HOST}[crlf][lf][crlf]GET / HTTP/1.1[crlf]Host:vantricks.kalmado.sbs[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]"
+
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-  echo -e "${C}║${N}         ${G}✔ ACCOUNT CREATED!${N}                 ${C}║${N}"
+  echo -e "${C}║${N}      ${G}✔ SSH + OVPN ACCOUNT CREATED!${N}             ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Username        : ${G}$NEW_USER${N}"
   echo -e "${C}║${N}  Password        : ${G}$NEW_PASS${N}"
@@ -1258,32 +1637,36 @@ create_user() {
   echo -e "${C}║${N}  Online Limit    : ${G}$MAX_SESSION${N}"
   echo -e "${C}║${N}  Expire Date     : ${G}$EXP_DATE_DISPLAY${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${C}║${N}  Host            : ${G}$HOST${N}"
+  echo -e "${C}║${N}  Host / IP       : ${G}$HOST${N} (${G}$SERVER_IP${N})"
+  echo -e "${C}║${N}  SSH / WS Ports  : ${G}22, 80, 443, 8080${N}"
+  echo -e "${C}║${N}  OVPN TCP 443    : ${G}${OVPN_CLIENT_DIR}/${NEW_USER}-tcp443.ovpn${N}"
+  echo -e "${C}║${N}  OVPN UDP 1194   : ${G}${OVPN_CLIENT_DIR}/${NEW_USER}-udp1194.ovpn${N}"
   echo -e "${C}║${N}  Nameserver      : ${G}$NAMESERVER${N}"
   echo -e "${C}║${N}  Public Key      : ${G}${DNSTT_PUBKEY}${N}"
+  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+  echo -e " ${W}Payload 1:${N}"
+  echo -e " ${G}${PAYLOAD_1}${N}"
+  echo ""
+  echo -e " ${W}Payload 2:${N}"
+  echo -e " ${G}${PAYLOAD_2}${N}"
   echo -e "${C}╚══════════════════════════════════════════════╝${N}"
   press_enter
 }
 
-# ══════════════════════════════════════════════
-#   REMOVE USER
-# ══════════════════════════════════════════════
-
-remove_user() {
+remove_ssh_ovpn_user() {
   while true; do
     clear
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-    echo -e "${C}║${N}          ${W}DELETE SSH ACCOUNT${N}                ${C}║${N}"
+    echo -e "${C}║${N}       ${W}DELETE SSH + OPENVPN ACCOUNT${N}             ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
 
     USERS=()
     INDEX=1
+    NOW_S=$(date +%s)
     while IFS=: read -r user _ uid _ _ _ _; do
       if [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
         EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
         EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
-        NOW_S=$(date +%s)
-        # Only show active (non-expired) accounts
         if [ "$EXP" == "never" ] || [ "$EXP_S" -gt "$NOW_S" ] 2>/dev/null; then
           SESS=$(ps aux | grep -c "sshd: $user@" 2>/dev/null || echo 0)
           echo -e "${C}║${N}  ${W}[$INDEX]${N} $user  ${Y}|${N} Exp: ${G}$EXP${N}  ${Y}|${N} Online: ${G}$SESS${N}"
@@ -1302,38 +1685,43 @@ remove_user() {
 
     if [ "$DEL_OPT" == "0" ]; then
       break
-
     elif [ "$DEL_OPT" == "e" ]; then
       COUNT=0
-      for u in "${USERS[@]}"; do
-        EXP=$(chage -l "$u" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
-        if [ "$EXP" == "never" ] || [[ $(date -d "$EXP" +%s 2>/dev/null) -lt $(date +%s) ]]; then
-          sed -i "/Match User $u/,/MaxSessions/d" /etc/ssh/sshd_config
-          userdel -r "$u" > /dev/null 2>&1
-          COUNT=$((COUNT + 1))
+      NOW_S=$(date +%s)
+      while IFS=: read -r u _ uid _ _ _ _; do
+        if [ "$uid" -ge 1000 ] && [ "$u" != "nobody" ]; then
+          EXP=$(chage -l "$u" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+          if [ "$EXP" != "never" ] && [ -n "$EXP" ]; then
+            EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
+            if [ "$EXP_S" -lt "$NOW_S" ]; then
+              sed -i "/Match User $u/,/MaxSessions/d" /etc/ssh/sshd_config
+              rm -f "${OVPN_CLIENT_DIR}/${u}-tcp443.ovpn" "${OVPN_CLIENT_DIR}/${u}-udp1194.ovpn" "${OVPN_CLIENT_DIR}/${u}.ovpn" 2>/dev/null
+              userdel -r "$u" > /dev/null 2>&1
+              COUNT=$((COUNT + 1))
+            fi
+          fi
         fi
-      done
+      done < /etc/passwd
       systemctl restart ssh > /dev/null 2>&1
-      echo -e "\n${G} [✓] Deleted $COUNT expired/no-expiration users!${N}"
+      echo -e "\n${G} [✓] Deleted $COUNT expired SSH+OVPN users!${N}"
       sleep 2
-
     elif [ "$DEL_OPT" == "A" ]; then
       for u in "${USERS[@]}"; do
         sed -i "/Match User $u/,/MaxSessions/d" /etc/ssh/sshd_config
+        rm -f "${OVPN_CLIENT_DIR}/${u}-tcp443.ovpn" "${OVPN_CLIENT_DIR}/${u}-udp1194.ovpn" "${OVPN_CLIENT_DIR}/${u}.ovpn" 2>/dev/null
         userdel -r "$u" > /dev/null 2>&1
       done
       systemctl restart ssh > /dev/null 2>&1
-      echo -e "\n${G} [✓] All users deleted!${N}"
+      echo -e "\n${G} [✓] All SSH+OVPN users deleted!${N}"
       sleep 2
-
     elif [[ "$DEL_OPT" =~ ^[0-9]+$ ]] && [ "$DEL_OPT" -ge 1 ] && [ "$DEL_OPT" -lt "$INDEX" ]; then
       TARGET="${USERS[$((DEL_OPT - 1))]}"
       sed -i "/Match User $TARGET/,/MaxSessions/d" /etc/ssh/sshd_config
+      rm -f "${OVPN_CLIENT_DIR}/${TARGET}-tcp443.ovpn" "${OVPN_CLIENT_DIR}/${TARGET}-udp1194.ovpn" "${OVPN_CLIENT_DIR}/${TARGET}.ovpn" 2>/dev/null
       userdel -r "$TARGET" > /dev/null 2>&1
       systemctl restart ssh > /dev/null 2>&1
-      echo -e "\n${G} [✓] User '$TARGET' deleted!${N}"
+      echo -e "\n${G} [✓] User '$TARGET' (SSH + OVPN) deleted!${N}"
       sleep 2
-
     else
       echo -e "\n${R} [!] Invalid option!${N}"
       sleep 1
@@ -1341,25 +1729,21 @@ remove_user() {
   done
 }
 
-# ══════════════════════════════════════════════
-#   CHECK USER
-# ══════════════════════════════════════════════
-
-check_user() {
+check_ssh_ovpn_user() {
+  sync_host_config
   while true; do
     clear
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-    echo -e "${C}║${N}           ${W}CHECK SSH ACCOUNT${N}                ${C}║${N}"
+    echo -e "${C}║${N}        ${W}CHECK SSH + OPENVPN ACCOUNT${N}             ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
 
     USERS=()
     INDEX=1
+    NOW_S=$(date +%s)
     while IFS=: read -r user _ uid _ _ _ _; do
       if [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
         EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
         EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
-        NOW_S=$(date +%s)
-        # Only show active (non-expired) accounts
         if [ "$EXP" == "never" ] || [ "$EXP_S" -gt "$NOW_S" ] 2>/dev/null; then
           SESS=$(ps aux | grep -c "sshd: $user@" 2>/dev/null || echo 0)
           echo -e "${C}║${N}  ${W}[$INDEX]${N} $user  ${Y}|${N} Exp: ${G}$EXP${N}  ${Y}|${N} Online: ${G}$SESS${N}"
@@ -1384,24 +1768,29 @@ check_user() {
       MAXSESS=${MAXSESS:-2}
       EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
       NOW_S=$(date +%s)
-      if [ "$EXP_S" -lt "$NOW_S" ] 2>/dev/null; then
+      if [ "$EXP" != "never" ] && [ "$EXP_S" -lt "$NOW_S" ] 2>/dev/null; then
         STATUS="${R}EXPIRED${N}"
       else
         STATUS="${G}ACTIVE${N}"
       fi
+      TCP_OVPN="${OVPN_CLIENT_DIR}/${CHK_USER}-tcp443.ovpn"
+      UDP_OVPN="${OVPN_CLIENT_DIR}/${CHK_USER}-udp1194.ovpn"
+      [ ! -f "$TCP_OVPN" ] || [ ! -f "$UDP_OVPN" ] && generate_ovpn_profile "$CHK_USER"
+
       clear
       echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-      echo -e "${C}║${N}           ${W}ACCOUNT DETAILS${N}                  ${C}║${N}"
+      echo -e "${C}║${N}         ${W}SSH + OVPN ACCOUNT DETAILS${N}           ${C}║${N}"
       echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-      echo -e "${C}║${N}  Username    : ${G}$CHK_USER${N}"
-      echo -e "${C}║${N}  Status      : $STATUS"
-      echo -e "${C}║${N}  Online      : ${G}$ONLINE session(s)${N}"
-      echo -e "${C}║${N}  Max Session : ${G}$MAXSESS${N}"
-      echo -e "${C}║${N}  Expires     : ${G}$EXP${N}"
+      echo -e "${C}║${N}  Username     : ${G}$CHK_USER${N}"
+      echo -e "${C}║${N}  Status       : $STATUS"
+      echo -e "${C}║${N}  Online       : ${G}$ONLINE SSH session(s)${N}"
+      echo -e "${C}║${N}  Max Session  : ${G}$MAXSESS${N}"
+      echo -e "${C}║${N}  Expires      : ${G}$EXP${N}"
       echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-      echo -e "${C}║${N}  Host        : ${G}$HOST${N}"
-      echo -e "${C}║${N}  SSH Port    : ${G}22, 80, 443${N}"
-      echo -e "${C}║${N}  WS Port     : ${G}8080${N}"
+      echo -e "${C}║${N}  Host         : ${G}$HOST${N}"
+      echo -e "${C}║${N}  SSH / WS     : ${G}22, 80, 443, 8080${N}"
+      echo -e "${C}║${N}  OVPN TCP 443 : ${G}$TCP_OVPN${N}"
+      echo -e "${C}║${N}  OVPN UDP 1194: ${G}$UDP_OVPN${N}"
       echo -e "${C}╚══════════════════════════════════════════════╝${N}"
       press_enter
     else
@@ -1411,24 +1800,19 @@ check_user() {
   done
 }
 
-# ══════════════════════════════════════════════
-#   LIST USERS
-# ══════════════════════════════════════════════
-
-list_users() {
+list_ssh_ovpn_users() {
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-  echo -e "${C}║${N}          ${W}ALL SSH ACCOUNTS${N}                  ${C}║${N}"
+  echo -e "${C}║${N}        ${W}ALL SSH + OPENVPN ACCOUNTS${N}              ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   printf "${C}║${N}  %-15s %-22s %-6s\n" "Username" "Expires" "Online"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   COUNT=0
+  NOW_S=$(date +%s)
   while IFS=: read -r user _ uid _ _ _ _; do
     if [ "$uid" -ge 1000 ] && [ "$user" != "nobody" ]; then
       EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
       EXP_S=$(date -d "$EXP" +%s 2>/dev/null || echo 0)
-      NOW_S=$(date +%s)
-      # Only show active accounts
       if [ "$EXP" == "never" ] || [ "$EXP_S" -gt "$NOW_S" ] 2>/dev/null; then
         ONLINE=$(ps aux | grep -c "sshd: $user@" 2>/dev/null || echo 0)
         printf "${C}║${N}  ${G}%-15s${N} %-22s %-6s\n" "$user" "$EXP" "$ONLINE"
@@ -1437,42 +1821,10 @@ list_users() {
     fi
   done < /etc/passwd
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${C}║${N}  Total: ${G}$COUNT account(s)${N}"
+  echo -e "${C}║${N}  Total: ${G}$COUNT account(s)${N} (.ovpn in ${OVPN_CLIENT_DIR})"
   echo -e "${C}╚══════════════════════════════════════════════╝${N}"
   press_enter
 }
-
-# ══════════════════════════════════════════════
-#   WEBSOCKET STATUS
-# ══════════════════════════════════════════════
-
-ws_status() {
-  clear
-  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${W}         WEBSOCKET / PROXY STATUS            ${N}"
-  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo ""
-  for PORT in 8080; do
-    STATUS=$(systemctl is-active ws-proxy-${PORT} 2>/dev/null)
-    if [ "$STATUS" == "active" ]; then
-      echo -e " Port ${PORT}  : ${G}● Running${N}"
-    else
-      echo -e " Port ${PORT}  : ${R}✗ Stopped${N}"
-    fi
-  done
-  echo ""
-  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e " ${W}HTTP Custom / HTTP Injector Config:${N}"
-  echo -e " Host    : ${G}$HOST${N}"
-  echo -e " Port    : ${G}80 or 443 or 8080${N}"
-  echo -e " Payload : ${G}GET / HTTP/1.1[crlf]Host: $HOST[crlf]Upgrade: websocket[crlf][crlf]${N}"
-  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  press_enter
-}
-
-# ══════════════════════════════════════════════
-#   CHECK SERVICES
-# ══════════════════════════════════════════════
 
 check_services() {
   clear
@@ -1481,7 +1833,7 @@ check_services() {
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo ""
   svc_check() {
-    STATUS=$(systemctl is-active $1 2>/dev/null)
+    STATUS=$(systemctl is-active "$1" 2>/dev/null)
     if [ "$STATUS" == "active" ]; then
       echo -e "${G}✓ [WORKING]${N}"
     else
@@ -1498,42 +1850,42 @@ check_services() {
     fi
   }
   echo -e " SSH             - $(svc_check ssh)"
+  echo -e " OVPN UDP 1194   - $(svc_check openvpn@server)"
+  echo -e " OVPN TCP 443    - $(svc_check openvpn@server-tcp)"
   echo -e " SSL             - $(svc_check stunnel4)"
   echo -e " MULTIPLEXER     - $(svc_check_sslh)"
   echo -e " NGINX           - $(svc_check nginx)"
   echo -e " DNSTT           - $(svc_check dnstt)"
   echo -e " WEBSOCKET       - $(svc_check ws-proxy-8080)"
-  echo -e " XRAY            - $(svc_check xray)"
+  echo -e " XRAY (WS/TRJ) - $(svc_check xray)"
   echo ""
   press_enter
 }
 
-# ══════════════════════════════════════════════
-#   RESTART SERVICES
-# ══════════════════════════════════════════════
-
 restart_services() {
+  sync_host_config
   clear
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
   echo -e "${C}║${N}          ${W}RESTARTING SERVICES${N}               ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo ""
-  # Kill apache2 if running — it conflicts with sslh on port 80/443
   systemctl stop apache2 > /dev/null 2>&1
   systemctl disable apache2 > /dev/null 2>&1
   systemctl mask apache2 > /dev/null 2>&1
-  DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y apache2 apache2-* > /dev/null 2>&1
   fuser -k 80/tcp > /dev/null 2>&1
   fuser -k 443/tcp > /dev/null 2>&1
+
   systemctl restart ssh > /dev/null 2>&1
   echo -e " ${G}[✓]${N} SSH restarted"
+  systemctl restart openvpn@server openvpn@server-tcp > /dev/null 2>&1
+  echo -e " ${G}[✓]${N} OpenVPN (UDP 1194 & TCP 443) restarted"
   systemctl stop stunnel4 > /dev/null 2>&1
   sleep 1
   systemctl start stunnel4 > /dev/null 2>&1
   echo -e " ${G}[✓]${N} SSL (stunnel4) restarted"
   systemctl restart nginx > /dev/null 2>&1
   echo -e " ${G}[✓]${N} Nginx restarted"
-  sleep 2
+  sleep 1
   systemctl restart sslh > /dev/null 2>&1 || systemctl restart sslh-select > /dev/null 2>&1
   echo -e " ${G}[✓]${N} Multiplexer restarted"
   systemctl restart dnstt > /dev/null 2>&1
@@ -1541,14 +1893,14 @@ restart_services() {
   systemctl restart ws-proxy-8080 > /dev/null 2>&1
   echo -e " ${G}[✓]${N} WebSocket restarted"
   systemctl restart xray > /dev/null 2>&1
-  echo -e " ${G}[✓]${N} Xray/V2Ray restarted"
+  echo -e " ${G}[✓]${N} Xray (VMess/VLESS/Trojan WS) restarted"
   echo ""
   echo -e "${C}╚══════════════════════════════════════════════╝${N}"
   press_enter
 }
 
 # ══════════════════════════════════════════════
-#   V2RAY MENU
+#   V2RAY / XRAY MENU (VMess + VLESS + Trojan WS + QR)
 # ══════════════════════════════════════════════
 
 v2ray_menu() {
@@ -1561,13 +1913,13 @@ v2ray_menu() {
       V2RAY_DOT="${R}STOPPED${N}"
     fi
     echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-    echo -e "${C}║${N}           ${W}V2RAY MANAGEMENT${N}                  ${C}║${N}"
+    echo -e "${C}║${N}       ${W}V2RAY / XRAY WS MANAGEMENT${N}             ${C}║${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  Status  : $V2RAY_DOT"
+    echo -e "${C}║${N}  Status  : $V2RAY_DOT (VMess / VLESS / Trojan)"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${C}║${N}  ${W}[1]${N} Create Account                       ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[1]${N} Create Account (WS + TLS/Non-TLS + QR) ${C}║${N}"
     echo -e "${C}║${N}  ${W}[2]${N} Delete Account                       ${C}║${N}"
-    echo -e "${C}║${N}  ${W}[3]${N} Check Account                        ${C}║${N}"
+    echo -e "${C}║${N}  ${W}[3]${N} Check Account, Links & QR            ${C}║${N}"
     echo -e "${C}║${N}  ${W}[0]${N} Back to Main Menu                    ${C}║${N}"
     echo -e "${C}╚══════════════════════════════════════════════╝${N}"
     read -p " Option >>> " V2OPT
@@ -1581,165 +1933,39 @@ v2ray_menu() {
   done
 }
 
-# ══════════════════════════════════════════════
-#   V2RAY INSTALL
-# ══════════════════════════════════════════════
-
-v2ray_install() {
-  clear
-  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${W}           INSTALLING V2RAY/XRAY              ${N}"
-  echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo ""
-  echo -e " ${Y}[*] Downloading and installing V2Ray...${N}"
-  bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
-  echo -e " ${G}[✓] V2Ray binary installed${N}"
-
-  mkdir -p /usr/local/etc/xray /etc/xray
-  touch /etc/xray/accounts.db
-
-  # Write base config with all protocols on internal ports
-  cat > /usr/local/etc/xray/config.json << CFGEOF
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "port": 10086,
-      "listen": "127.0.0.1",
-      "protocol": "vmess",
-      "settings": {
-        "clients": []
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": {
-          "path": "/vmess"
-        }
-      }
-    },
-    {
-      "port": 10087,
-      "listen": "127.0.0.1",
-      "protocol": "vless",
-      "settings": {
-        "clients": [],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": {
-          "path": "/vless"
-        }
-      }
-    },
-    {
-      "port": 10088,
-      "listen": "127.0.0.1",
-      "protocol": "trojan",
-      "settings": {
-        "clients": []
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": {
-          "path": "/trojan"
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "freedom"
-    }
-  ]
-}
-CFGEOF
-
-  echo -e " ${G}[✓] V2Ray config written (VMess/VLESS/Trojan on 10086-10088)${N}"
-
-  # Update sslh to route WS/HTTP traffic to all xray ports
-  SSLH_CFG="/etc/sslh/sslh.cfg"
-  if [ -f "$SSLH_CFG" ]; then
-    cat > "$SSLH_CFG" << 'SSLHEOF'
-foreground: true;
-inetd: false;
-numeric: false;
-transparent: false;
-timeout: 5;
-user: "sslh";
-pidfile: "/var/run/sslh/sslh.pid";
-
-listen:
-(
-  { host: "0.0.0.0"; port: "80"; },
-  { host: "0.0.0.0"; port: "443"; }
-);
-
-protocols:
-(
-  { name: "ssh";     host: "127.0.0.1"; port: "22";    log_level: 0; },
-  { name: "tls";     host: "127.0.0.1"; port: "7443";  log_level: 0; },
-  { name: "http";    host: "127.0.0.1"; port: "10086"; log_level: 0; },
-  { name: "http";    host: "127.0.0.1"; port: "8080";  log_level: 0; },
-  { name: "anyprot"; host: "127.0.0.1"; port: "10086"; log_level: 0; }
-);
-SSLHEOF
-    systemctl restart sslh > /dev/null 2>&1
-    echo -e " ${G}[✓] sslh updated — Xray now accessible on ports 80, 443${N}"
-  fi
-
-  systemctl enable xray > /dev/null 2>&1
-  systemctl start xray > /dev/null 2>&1
-  sleep 2
-
-  if systemctl is-active --quiet xray; then
-    echo -e " ${G}[✓] V2Ray running! Accessible via sslh on ports 80, 443${N}"
-  else
-    echo -e " ${R}[!] V2Ray failed to start. Check: journalctl -u xray${N}"
-  fi
-  echo ""
-  press_enter
-}
-
-# ══════════════════════════════════════════════
-#   V2RAY CREATE USER (protocol picker)
-# ══════════════════════════════════════════════
-
 v2ray_create_user() {
+  verify_package_gate || return
   while true; do
     clear
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${W}            Create V2Ray User                ${N}"
+    echo -e "${W}       Create Xray WebSocket Account           ${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e " ${W}[1]${N} VLESS"
-    echo -e " ${W}[2]${N} VMess"
-    echo -e " ${W}[3]${N} trojan"
+    echo -e " ${W}[1]${N} VLESS (WS /vless)"
+    echo -e " ${W}[2]${N} VMess (WS /vmess)"
+    echo -e " ${W}[3]${N} Trojan (WS /trojan)"
     echo -e " ${W}[0]${N} Return"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     read -p " Option: " PROTO_OPT
     case $PROTO_OPT in
-      1) v2ray_create_account "vless"        ;;
-      2) v2ray_create_account "vmess"        ;;
-      3) v2ray_create_account "trojan"       ;;
+      1) v2ray_create_account "vless"  ;;
+      2) v2ray_create_account "vmess"  ;;
+      3) v2ray_create_account "trojan" ;;
       0) break ;;
       *) echo -e "${R} Invalid option!${N}"; sleep 1 ;;
     esac
   done
 }
 
-# ══════════════════════════════════════════════
-#   V2RAY CREATE ACCOUNT (per protocol)
-# ══════════════════════════════════════════════
-
 v2ray_create_account() {
   PROTO="$1"
-  source "$CONFIG_FILE"
+  sync_host_config
+  mkdir -p /usr/local/etc/xray /etc/xray
+  touch "$XRAY_DB"
+
   clear
   DATETIME=$(date "+%b %d, %Y %I:%M:%S %p")
   echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-  echo -e "${C}║${N}        ${W}Create ${PROTO^^} Account${N}               ${C}║${N}"
+  echo -e "${C}║${N}      ${W}Create ${PROTO^^} (WebSocket) Account${N}         ${C}║${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e "${C}║${N}  Time : ${G}$DATETIME${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
@@ -1747,7 +1973,7 @@ v2ray_create_account() {
   if [ "$PROTO" == "trojan" ]; then
     read -p "  Enter password: " V2_PASSWORD
     read -p "  Expiration (days): " V2_DAYS
-    V2_USER="trojan_$(date +%s | tail -c 11 | tr -d '\n')"
+    V2_USER="trojan_$(date +%s | tail -c 8)"
     V2_UUID="$V2_PASSWORD"
     if [ -z "$V2_PASSWORD" ] || [ -z "$V2_DAYS" ]; then
       echo -e "\n${R} [!] All fields are required!${N}"
@@ -1756,93 +1982,92 @@ v2ray_create_account() {
   else
     read -p "  Enter username: " V2_USER
     read -p "  Expiration (days): " V2_DAYS
-    V2_UUID="$V2_USER"
     if [ -z "$V2_USER" ] || [ -z "$V2_DAYS" ]; then
       echo -e "\n${R} [!] All fields are required!${N}"
       sleep 2; return
     fi
-    if grep -q "^$V2_USER " /etc/xray/accounts.db 2>/dev/null; then
+    if grep -q "^${V2_USER} " "$XRAY_DB" 2>/dev/null; then
       echo -e "\n${R} [!] User '$V2_USER' already exists!${N}"
       sleep 2; return
     fi
+    V2_UUID=$(python3 - << 'UUIDEOF'
+import uuid
+print(str(uuid.uuid4()))
+UUIDEOF
+)
   fi
 
   V2_EXPIRY=$(date -d "+${V2_DAYS} days" +"%Y-%m-%d %H:%M:%S")
-  V2_EXPIRY_FULL=$(date -d "+${V2_DAYS} days" "+%Y-%m-%d %H:%M:%S")
-  SERVER_IP=$(hostname -I | awk '{print $1}')
 
-  # Determine internal port and path based on protocol
   case $PROTO in
     vless)  V2_PORT=10087; V2_PATH="/vless"  ;;
     vmess)  V2_PORT=10086; V2_PATH="/vmess"  ;;
     trojan) V2_PORT=10088; V2_PATH="/trojan" ;;
   esac
-  V2_PUBLIC_PORTS="80, 443"
 
-  # Save to accounts db
-  echo "$V2_USER $V2_UUID $V2_EXPIRY $PROTO" >> /etc/xray/accounts.db
+  echo "$V2_USER $V2_UUID $V2_EXPIRY $PROTO" >> "$XRAY_DB"
 
-  # Inject client into the matching inbound in config.json
   python3 - << PYEOF
-import json, sys
-path = '/usr/local/etc/xray/config.json'
+import json
+
+path = "$XRAY_CONF"
 try:
     with open(path) as f:
         cfg = json.load(f)
-except:
-    cfg = {"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom"}]}
+except Exception:
+    cfg = {"log": {"loglevel": "warning"}, "inbounds": [], "outbounds": [{"protocol": "freedom"}]}
 
 proto = "$PROTO"
-uuid  = "$V2_UUID"
-user  = "$V2_USER"
-port  = int("$V2_PORT")
+uuid_val = "$V2_UUID"
+user = "$V2_USER"
+port = int("$V2_PORT")
 path_ws = "$V2_PATH"
 
-# Check if matching inbound exists
 found = False
-for inb in cfg.get('inbounds', []):
-    if inb.get('protocol') == proto:
-        clients = inb['settings'].get('clients', [])
-        if proto == 'trojan':
-            clients.append({"password": uuid, "email": user})
+for inb in cfg.get("inbounds", []):
+    if inb.get("protocol") == proto:
+        clients = inb["settings"].get("clients", [])
+        if proto == "trojan":
+            clients.append({"password": uuid_val, "email": user})
         else:
-            clients.append({"id": uuid, "alterId": 0, "email": user})
-        inb['settings']['clients'] = clients
+            clients.append({"id": uuid_val, "alterId": 0, "email": user})
+        inb["settings"]["clients"] = clients
         found = True
         break
 
 if not found:
-    if proto == 'trojan':
+    if proto == "trojan":
         new_inb = {
-            "port": port, "listen": "127.0.0.1", "protocol": proto,
-            "settings": {"clients": [{"password": uuid, "email": user}]},
+            "port": port,
+            "listen": "127.0.0.1",
+            "protocol": proto,
+            "settings": {"clients": [{"password": uuid_val, "email": user}]},
             "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws}}
         }
     else:
         new_inb = {
-            "port": port, "listen": "127.0.0.1", "protocol": proto,
-            "settings": {"clients": [{"id": uuid, "alterId": 0, "email": user}]},
+            "port": port,
+            "listen": "127.0.0.1",
+            "protocol": proto,
+            "settings": {"clients": [{"id": uuid_val, "alterId": 0, "email": user}]},
             "streamSettings": {"network": "ws", "wsSettings": {"path": path_ws}}
         }
-    cfg.setdefault('inbounds', []).append(new_inb)
+    cfg.setdefault("inbounds", []).append(new_inb)
 
-with open(path, 'w') as f:
+with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
-print("OK")
 PYEOF
 
   systemctl restart xray > /dev/null 2>&1
 
-  # Accurate expiry countdown
   NOW_S=$(date +%s)
-  EXP_S=$(date -d "$V2_EXPIRY_FULL" +%s 2>/dev/null || date -d "$V2_EXPIRY" +%s)
+  EXP_S=$(date -d "$V2_EXPIRY" +%s 2>/dev/null || echo "$NOW_S")
   SECS_TOTAL=$(( EXP_S - NOW_S ))
   DAYS_LEFT=$(( SECS_TOTAL / 86400 ))
   HRS_LEFT=$(( (SECS_TOTAL % 86400) / 3600 ))
   MINS_LEFT=$(( (SECS_TOTAL % 3600) / 60 ))
   SECS_LEFT=$(( SECS_TOTAL % 60 ))
 
-  # Build connection links based on protocol
   if [ "$PROTO" == "trojan" ]; then
     LINK_TLS="trojan://${V2_UUID}@${HOST}:443?type=ws&security=tls&host=${HOST}&path=${V2_PATH}&sni=${HOST}#${V2_UUID}"
     LINK_NTLS="trojan://${V2_UUID}@${HOST}:80?type=ws&host=${HOST}&path=${V2_PATH}#${V2_UUID}"
@@ -1858,37 +2083,36 @@ PYEOF
 
   clear
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${W}        ${PROTO^^} USER CREATED                 ${N}"
+  echo -e "${W}      ${PROTO^^} (WEBSOCKET) ACCOUNT CREATED         ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   if [ "$PROTO" == "trojan" ]; then
-  echo -e " Password    : ${G}$V2_UUID${N}"
+    echo -e " Password    : ${G}$V2_UUID${N}"
   else
-  echo -e " Username    : ${G}$V2_USER${N}"
+    echo -e " Username    : ${G}$V2_USER${N}"
+    echo -e " UUID        : ${G}$V2_UUID${N}"
   fi
-  echo -e " Expiration  : ${G}${DAYS_LEFT} days${N}"
-  echo -e " Expire Date : ${G}$V2_EXPIRY_FULL${N}"
+  echo -e " Network     : ${G}WebSocket (ws)${N}"
+  echo -e " Path        : ${G}$V2_PATH${N}"
+  echo -e " Expire Date : ${G}$V2_EXPIRY${N}"
   echo -e " Expires in  : ${G}${DAYS_LEFT}d ${HRS_LEFT}h ${MINS_LEFT}m ${SECS_LEFT}s${N}"
-  echo -e " Domain      : ${G}$HOST${N}"
-  echo -e " SNI         : ${G}$HOST${N}"
+  echo -e " Domain/SNI  : ${G}$HOST${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo -e " TLS (443):"
   echo -e " ${G}${LINK_TLS}${N}"
+  print_qr_link "TLS (443)" "$LINK_TLS"
   echo ""
   echo -e " Non-TLS (80):"
   echo -e " ${G}${LINK_NTLS}${N}"
+  print_qr_link "Non-TLS (80)" "$LINK_NTLS"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   press_enter
 }
-
-# ══════════════════════════════════════════════
-#   V2RAY DELETE USER
-# ══════════════════════════════════════════════
 
 v2ray_delete_user() {
   while true; do
     clear
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${W}           Delete V2Ray User                 ${N}"
+    echo -e "${W}           Delete Xray User                    ${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e " ${W}[1]${N} VLESS"
     echo -e " ${W}[2]${N} VMess"
@@ -1908,6 +2132,7 @@ v2ray_delete_user() {
 
 v2ray_delete_by_proto() {
   FILTER_PROTO="$1"
+  touch "$XRAY_DB"
   while true; do
     clear
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
@@ -1916,6 +2141,7 @@ v2ray_delete_by_proto() {
 
     VACCS=()
     IDX=1
+    NOW_S=$(date +%s)
 
     while IFS= read -r line; do
       [ -z "$line" ] && continue
@@ -1930,8 +2156,9 @@ v2ray_delete_by_proto() {
         vproto=$(echo "$line" | awk '{print $4}')
       fi
       if [ "$vproto" == "$FILTER_PROTO" ]; then
-        SECS_LEFT=$(( $(date -d "$vexpiry" +%s 2>/dev/null || echo 0) - $(date +%s) ))
-        if [ $SECS_LEFT -le 0 ]; then
+        EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null || echo 0)
+        SECS_LEFT=$(( EXP_S - NOW_S ))
+        if [ "$SECS_LEFT" -le 0 ]; then
           TIME_LEFT="${R}EXPIRED${N}"
         else
           D=$(( SECS_LEFT/86400 ))
@@ -1939,7 +2166,6 @@ v2ray_delete_by_proto() {
           M=$(( (SECS_LEFT%3600)/60 ))
           TIME_LEFT="${G}${D}d ${H}h ${M}m${N}"
         fi
-        # Show password for trojan, username for others
         if [ "$FILTER_PROTO" == "trojan" ]; then
           DISPLAY_NAME="$vuuid"
         else
@@ -1949,7 +2175,7 @@ v2ray_delete_by_proto() {
         VACCS+=("$vuser:$vuuid:$vexpiry:$vproto")
         IDX=$((IDX + 1))
       fi
-    done < /etc/xray/accounts.db
+    done < "$XRAY_DB"
 
     if [ ${#VACCS[@]} -eq 0 ]; then
       echo -e " ${Y} No ${FILTER_PROTO^^} accounts found.${N}"
@@ -1967,33 +2193,48 @@ v2ray_delete_by_proto() {
       break
     elif [ "$DOPT" == "e" ]; then
       COUNT=0
-      TODAY=$(date +%Y-%m-%d)
-      while read -r vuser vuuid vexpiry vproto; do
-        if [ "$vproto" == "$FILTER_PROTO" ] && [[ "$vexpiry" < "$TODAY" ]]; then
-          sed -i "/^$vuser /d" /etc/xray/accounts.db
-          COUNT=$((COUNT+1))
+      NOW_S=$(date +%s)
+      TMP=$(mktemp)
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        vuser=$(echo "$line" | awk '{print $1}')
+        vuuid=$(echo "$line" | awk '{print $2}')
+        NCOLS=$(echo "$line" | awk '{print NF}')
+        if [ "$NCOLS" -ge 5 ]; then
+          vexpiry=$(echo "$line" | awk '{print $3" "$4}')
+          vproto=$(echo "$line" | awk '{print $5}')
+        else
+          vexpiry=$(echo "$line" | awk '{print $3}')
+          vproto=$(echo "$line" | awk '{print $4}')
         fi
-      done < /etc/xray/accounts.db
+        EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null || echo 0)
+        if [ "$vproto" == "$FILTER_PROTO" ] && [ "$EXP_S" -le "$NOW_S" ]; then
+          COUNT=$((COUNT + 1))
+        else
+          echo "$line" >> "$TMP"
+        fi
+      done < "$XRAY_DB"
+      mv "$TMP" "$XRAY_DB"
       systemctl restart xray > /dev/null 2>&1
       echo -e "\n ${G}[✓] Removed $COUNT expired ${FILTER_PROTO^^} users!${N}"
       sleep 2
     elif [ "$DOPT" == "A" ]; then
-      while read -r vuser vuuid vexpiry vproto; do
-        if [ "$vproto" == "$FILTER_PROTO" ]; then
-          sed -i "/^$vuser /d" /etc/xray/accounts.db
-        fi
-      done < /etc/xray/accounts.db
-      # Remove all clients from this inbound in config
+      TMP=$(mktemp)
+      grep -v " ${FILTER_PROTO}$" "$XRAY_DB" > "$TMP" 2>/dev/null || true
+      mv "$TMP" "$XRAY_DB"
       python3 - << PYEOF
 import json
-path = '/usr/local/etc/xray/config.json'
-with open(path) as f:
-    cfg = json.load(f)
-for inb in cfg.get('inbounds', []):
-    if inb.get('protocol') == '$FILTER_PROTO':
-        inb['settings']['clients'] = []
-with open(path, 'w') as f:
-    json.dump(cfg, f, indent=2)
+path = "$XRAY_CONF"
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+    for inb in cfg.get("inbounds", []):
+        if inb.get("protocol") == "$FILTER_PROTO":
+            inb["settings"]["clients"] = []
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+except Exception:
+    pass
 PYEOF
       systemctl restart xray > /dev/null 2>&1
       echo -e "\n ${G}[✓] All ${FILTER_PROTO^^} users removed!${N}"
@@ -2004,24 +2245,27 @@ PYEOF
       DEL_UUID=$(echo "$TARGET" | cut -d: -f2)
       DEL_PROTO=$(echo "$TARGET" | cut -d: -f4)
 
-      sed -i "/^$DEL_USER /d" /etc/xray/accounts.db
+      sed -i "/^${DEL_USER} /d" "$XRAY_DB"
 
       python3 - << PYEOF
 import json
-path = '/usr/local/etc/xray/config.json'
-with open(path) as f:
-    cfg = json.load(f)
+path = "$XRAY_CONF"
 proto = "$DEL_PROTO"
-uuid  = "$DEL_UUID"
-for inb in cfg.get('inbounds', []):
-    if inb.get('protocol') == proto:
-        clients = inb['settings'].get('clients', [])
-        if proto in ['vless', 'vmess']:
-            inb['settings']['clients'] = [c for c in clients if c.get('id') != uuid]
-        else:
-            inb['settings']['clients'] = [c for c in clients if c.get('password') != uuid]
-with open(path, 'w') as f:
-    json.dump(cfg, f, indent=2)
+uuid_val = "$DEL_UUID"
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+    for inb in cfg.get("inbounds", []):
+        if inb.get("protocol") == proto:
+            clients = inb["settings"].get("clients", [])
+            if proto in ["vless", "vmess"]:
+                inb["settings"]["clients"] = [c for c in clients if c.get("id") != uuid_val]
+            else:
+                inb["settings"]["clients"] = [c for c in clients if c.get("password") != uuid_val]
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+except Exception:
+    pass
 PYEOF
       systemctl restart xray > /dev/null 2>&1
       echo -e "\n ${G}[✓] User '$DEL_USER' deleted!${N}"
@@ -2033,15 +2277,11 @@ PYEOF
   done
 }
 
-# ══════════════════════════════════════════════
-#   V2RAY CHECK USER
-# ══════════════════════════════════════════════
-
 v2ray_check_user() {
   while true; do
     clear
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-    echo -e "${W}           Check V2Ray Users                 ${N}"
+    echo -e "${W}           Check Xray Users & QR               ${N}"
     echo -e "${C}╠══════════════════════════════════════════════╣${N}"
     echo -e " ${W}[1]${N} VLESS"
     echo -e " ${W}[2]${N} VMess"
@@ -2061,10 +2301,11 @@ v2ray_check_user() {
 
 v2ray_check_by_proto() {
   FILTER_PROTO="$1"
-  source "$CONFIG_FILE"
+  sync_host_config
+  touch "$XRAY_DB"
   clear
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
-  echo -e "${W}           ${FILTER_PROTO^^} USERS                      ${N}"
+  echo -e "${W}           ${FILTER_PROTO^^} (WS) USERS                   ${N}"
   echo -e "${C}╠══════════════════════════════════════════════╣${N}"
   echo ""
 
@@ -2088,7 +2329,7 @@ v2ray_check_by_proto() {
       FOUND=1
       EXP_S=$(date -d "$vexpiry" +%s 2>/dev/null || echo 0)
       SECS_LEFT=$(( EXP_S - TODAY_S ))
-      if [ $SECS_LEFT -le 0 ]; then
+      if [ "$SECS_LEFT" -le 0 ]; then
         TIME_LEFT="EXPIRED"
       else
         D=$(( SECS_LEFT/86400 ))
@@ -2098,35 +2339,36 @@ v2ray_check_by_proto() {
         TIME_LEFT="${D}d ${H}h ${M}m ${S}s"
       fi
 
-      # Trojan uses password as remarks, vless/vmess use username
       if [ "$FILTER_PROTO" == "trojan" ]; then
         LINK_TLS="trojan://${vuuid}@${HOST}:443?type=ws&security=tls&host=${HOST}&path=/trojan&sni=${HOST}#${vuuid}"
         LINK_NTLS="trojan://${vuuid}@${HOST}:80?type=ws&host=${HOST}&path=/trojan#${vuuid}"
         echo -e " Password   : ${G}$vuuid${N}"
       elif [ "$FILTER_PROTO" == "vless" ]; then
-        LINK_TLS="vless://${vuuid}@${HOST}:443?encryption=none&type=ws&security=tls&host=${HOST}&path=/vless&sni=${HOST}#${vuser}"
+        LINK_TLS="vless://${vuuid}@${HOST}:443?encryption=none&type=ws&security=tls&host=${HOST}&path=${V2_PATH:-/vless}&sni=${HOST}#${vuser}"
         LINK_NTLS="vless://${vuuid}@${HOST}:80?encryption=none&type=ws&host=${HOST}&path=/vless#${vuser}"
         echo -e " Username   : ${G}$vuser${N}"
       else
         VMESS_TLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${HOST}\",\"port\":\"443\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${HOST}\"}"
         VMESS_NTLS="{\"v\":\"2\",\"ps\":\"${vuser}\",\"add\":\"${HOST}\",\"port\":\"80\",\"id\":\"${vuuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${HOST}\",\"path\":\"/vmess\",\"tls\":\"\"}"
         LINK_TLS="vmess://$(echo -n "$VMESS_TLS" | base64 -w 0)"
-        LINK_NTLS="vmess://$(echo -n "$VMESS_NTLS" | base64 -w 0)"
+        LINK_NTLS="vmess://$(echo -n "$VMESS_JSON2" | base64 -w 0)"
         echo -e " Username   : ${G}$vuser${N}"
       fi
 
       echo -e " Expiration : ${G}$TIME_LEFT${N}"
       echo -e " TLS (443)  :"
-      echo -e " ${G}$LINK_TLS${N}"
+      echo -e " ${G}${LINK_TLS}${N}"
+      print_qr_link "TLS (443)" "$LINK_TLS"
       echo ""
       echo -e " NON TLS (80):"
-      echo -e " ${G}$LINK_NTLS${N}"
+      echo -e " ${G}${LINK_NTLS}${N}"
+      print_qr_link "Non-TLS (80)" "$LINK_NTLS"
       echo -e " ${C}════════════════════════════════════════════════${N}"
       echo ""
     fi
-  done < /etc/xray/accounts.db
+  done < "$XRAY_DB"
 
-  if [ $FOUND -eq 0 ]; then
+  if [ "$FOUND" -eq 0 ]; then
     echo -e " ${Y} No ${FILTER_PROTO^^} accounts found.${N}"
   fi
 
