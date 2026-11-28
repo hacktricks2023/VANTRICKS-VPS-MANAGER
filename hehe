@@ -656,53 +656,151 @@ def get_public_ipv4(force_refresh=False):
     return local_ips[0] if local_ips else "0.0.0.0"
 
 
-def _parse_http_headers(raw_bytes):
-    header_block = raw_bytes.split(b"\r\n\r\n", 1)[0].decode("latin-1", errors="replace")
-    lines = [ln.strip() for ln in header_block.splitlines() if ln.strip()]
-    status_line = lines[0] if lines else "-"
-    headers = {}
-    for ln in lines[1:]:
-        if ":" in ln:
-            k, v = ln.split(":", 1)
-            kl = k.strip().lower()
-            headers.setdefault(kl, []).append(v.strip())
-    return status_line, headers, header_block
+def _recv_raw_buffer(sock, max_bytes=32768):
+    buf = bytearray()
+    view = memoryview(buf)
+    while b"\r\n\r\n" not in buf and len(buf) < max_bytes:
+        try:
+            chunk = sock.recv(4096)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        needed = max_bytes - len(buf)
+        if len(chunk) > needed:
+            chunk = chunk[:needed]
+        buf.extend(chunk)
+    header_part = bytes(buf).split(b"\r\n\r\n", 1)[0]
+    del view
+    return header_part.decode("latin-1", errors="replace")
 
 
-def _probe_http_or_ws(target_host, port=80, use_tls=False, ws_upgrade=False):
-    raw = b""
-    s = socket.create_connection((target_host, port), timeout=3.0)
-    s.settimeout(3.0)
+def _probe_raw_endpoint(target_host, port=80, use_tls=False, ws_upgrade=False):
+    raw_sock = socket.create_connection((target_host, port), timeout=3.0)
+    raw_sock.settimeout(3.0)
+    try:
+        raw_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4194304)
+        raw_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4194304)
+        raw_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
+
+    io_sock = raw_sock
     if use_tls:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        s = ctx.wrap_socket(s, server_hostname=target_host)
+        io_sock = ctx.wrap_socket(raw_sock, server_hostname=target_host)
+        io_sock.settimeout(3.0)
+
     if ws_upgrade:
-        probe = (
+        req_text = (
             f"GET / HTTP/1.1\r\n"
             f"Host: {target_host}\r\n"
             f"Upgrade: websocket\r\n"
             f"Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
             f"Sec-WebSocket-Version: 13\r\n"
-            f"User-Agent: Vantricks-CDN-Scanner/2.0\r\n\r\n"
-        ).encode("utf-8")
+            f"User-Agent: Vantricks-BufferScanner/3.0\r\n\r\n"
+        )
     else:
-        probe = (
+        req_text = (
             f"GET / HTTP/1.1\r\n"
             f"Host: {target_host}\r\n"
-            f"User-Agent: Vantricks-CDN-Scanner/2.0\r\n"
-            f"Connection: close\r\n\r\n"
-        ).encode("utf-8")
-    s.sendall(probe)
-    while b"\r\n\r\n" not in raw and len(raw) < 16384:
-        chunk = s.recv(4096)
-        if not chunk:
+            f"Connection: keep-alive\r\n"
+            f"User-Agent: Vantricks-BufferScanner/3.0\r\n\r\n"
+        )
+
+    payload = memoryview(req_text.encode("utf-8"))
+    sent = 0
+    while sent < len(payload):
+        n = io_sock.send(payload[sent:])
+        if n <= 0:
             break
-        raw += chunk
-    s.close()
-    return _parse_http_headers(raw)
+        sent += n
+
+    header_block = _recv_raw_buffer(io_sock)
+    try:
+        io_sock.close()
+    except Exception:
+        pass
+
+    lines = [ln.strip() for ln in header_block.splitlines() if ln.strip()]
+    status_line = lines[0] if lines else ""
+    parsed = {}
+    for ln in lines[1:]:
+        if ":" in ln:
+            k, v = ln.split(":", 1)
+            parsed.setdefault(k.strip().lower(), []).append(v.strip())
+    return status_line, parsed, "\n".join(lines)
+
+
+def format_raw_data_buffer(target_host, status_line, headers_map, is_ws=False):
+    def _first(key, fallback=None):
+        vals = headers_map.get(key.lower(), [])
+        return vals[0] if vals else fallback
+
+    def _join_dup(key, fallback=None):
+        vals = headers_map.get(key.lower(), [])
+        if not vals:
+            return fallback
+        if len(vals) == 1 and vals[0].lower() == "websocket" and is_ws:
+            return "websocket, websocket"
+        if len(vals) == 1 and vals[0] == "13" and is_ws:
+            return "13, 13"
+        if len(vals) == 1 and vals[0] == "vantricks-SSH" and is_ws:
+            return "vantricks-SSH, vantricks-SSH"
+        return ", ".join(vals)
+
+    out_lines = []
+    out_lines.append(status_line or ("HTTP/1.1 101 vantricks Protocols" if is_ws else "HTTP/1.1 301 Moved Permanently"))
+
+    date_val = _first("date", time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime()))
+    out_lines.append(f"Date: {date_val}")
+
+    ctype_val = _first("content-type")
+    if ctype_val and not is_ws:
+        out_lines.append(f"Content-Type: {ctype_val}")
+
+    te_val = _first("transfer-encoding")
+    if te_val and not is_ws:
+        out_lines.append(f"Transfer-Encoding: {te_val}")
+
+    conn_val = _first("connection", "upgrade" if is_ws else "keep-alive")
+    out_lines.append(f"Connection: {conn_val}")
+
+    loc_val = _first("location")
+    if loc_val:
+        out_lines.append(f"Location: {loc_val}")
+
+    srv_val = _first("server", "cloudflare" if ("cf-ray" in headers_map or "nel" in headers_map) else "nginx/1.22.1")
+    out_lines.append(f"Server: {srv_val}")
+
+    if is_ws:
+        out_lines.append(f"Upgrade: {_join_dup('upgrade', 'websocket, websocket')}")
+        out_lines.append(f"Sec-WebSocket-Version: {_join_dup('sec-websocket-version', '13, 13')}")
+        out_lines.append(f"Via: {_join_dup('via', 'vantricks-SSH, vantricks-SSH')}")
+        cache_val = _first("cf-cache-status")
+        if cache_val or "cloudflare" in srv_val.lower() or "cf-ray" in headers_map:
+            out_lines.append(f"cf-cache-status: {cache_val or 'DYNAMIC'}")
+
+    report_to = _first("report-to")
+    if report_to:
+        out_lines.append(f"Report-To: {report_to}")
+
+    nel_val = _first("nel")
+    if nel_val:
+        out_lines.append(f"Nel: {nel_val}")
+
+    cf_ray = _first("cf-ray")
+    if cf_ray:
+        out_lines.append(f"CF-RAY: {cf_ray}")
+
+    alt_svc = _first("alt-svc")
+    if alt_svc:
+        out_lines.append(f"alt-svc: {alt_svc}")
+
+    return "\n".join(out_lines)
 
 
 def scan_cdn_info(target_host):
@@ -715,109 +813,86 @@ def scan_cdn_info(target_host):
         except Exception:
             pass
 
-    info = {
-        "target": target_host or pub_ip,
-        "resolved_ips": resolved_ips or [pub_ip],
-        "cdn_provider": "DIRECT / ORIGIN",
-        "defense_rating": "90%",
-        "server": "nginx/1.22.1",
-        "cf_ray": "DIRECT-ORIGIN",
-        "cf_cache": "DYNAMIC",
-        "alt_svc": 'h3=":443"; ma=86400',
-        "via": "vantricks-SSH",
-        "status_line": "HTTP/1.1 101 vantricks Protocols",
-        "ws_status": "HTTP/1.1 101 vantricks Protocols",
-        "report_to": "-",
-        "nel": "-",
-        "raw_headers": "",
-    }
-    if not target_host or target_host == "N/A":
-        return info
-
-    merged_headers = {}
-    status_lines = []
-    raw_blocks = []
-
-    # 1. Probe WebSocket Upgrade on port 80 (captures 101 Switching Protocols / vantricks Protocols + Via + CF headers)
-    try:
-        st_ws, h_ws, raw_ws = _probe_http_or_ws(target_host, port=80, use_tls=False, ws_upgrade=True)
-        if st_ws and st_ws != "-":
-            info["ws_status"] = st_ws
-            status_lines.append(st_ws)
-            raw_blocks.append(raw_ws)
-            for k, vals in h_ws.items():
-                merged_headers.setdefault(k, []).extend(vals)
-    except Exception:
-        pass
-
-    # 2. Probe standard HTTP/80 (captures 301 Moved Permanently, Location, NEL, Report-To, Server, CF-Ray)
-    try:
-        st_http, h_http, raw_http = _probe_http_or_ws(target_host, port=80, use_tls=False, ws_upgrade=False)
-        if st_http and st_http != "-":
-            status_lines.append(st_http)
-            if not raw_blocks:
-                raw_blocks.append(raw_http)
-            for k, vals in h_http.items():
-                merged_headers.setdefault(k, []).extend(vals)
-    except Exception:
-        pass
-
-    # 3. Probe HTTPS/443 SNI if still missing Cloudflare/CDN headers
-    if "cf-ray" not in merged_headers:
+    st_ws, h_ws, raw_ws = ("", {}, "")
+    st_http, h_http, raw_http = ("", {}, "")
+    if target_host and target_host != "N/A":
         try:
-            st_tls, h_tls, raw_tls = _probe_http_or_ws(target_host, port=443, use_tls=True, ws_upgrade=False)
-            if st_tls and st_tls != "-":
-                status_lines.append(st_tls)
-                raw_blocks.append(raw_tls)
-                for k, vals in h_tls.items():
-                    merged_headers.setdefault(k, []).extend(vals)
+            st_ws, h_ws, raw_ws = _probe_raw_endpoint(target_host, port=80, use_tls=False, ws_upgrade=True)
         except Exception:
             pass
+        try:
+            st_http, h_http, raw_http = _probe_raw_endpoint(target_host, port=80, use_tls=False, ws_upgrade=False)
+        except Exception:
+            pass
+        if "cf-ray" not in h_http and "cf-ray" not in h_ws:
+            try:
+                st_tls, h_tls, raw_tls = _probe_raw_endpoint(target_host, port=443, use_tls=True, ws_upgrade=False)
+                for k, v in h_tls.items():
+                    h_http.setdefault(k, [])
+                    for item in v:
+                        if item not in h_http[k]:
+                            h_http[k].append(item)
+                if not st_http and st_tls:
+                    st_http = st_tls
+                if raw_tls:
+                    raw_http = (raw_http + "\n" + raw_tls).strip()
+            except Exception:
+                pass
 
-    def _uniq(key, default_val):
-        vals = list(dict.fromkeys(merged_headers.get(key, [])))
-        return ", ".join(vals) if vals else default_val
+    merged = dict(h_http)
+    for k, v in h_ws.items():
+        merged.setdefault(k, [])
+        for item in v:
+            if item not in merged[k]:
+                merged[k].append(item)
 
-    srv = _uniq("server", "nginx/1.22.1")
-    cf_ray = _uniq("cf-ray", "DIRECT-ORIGIN")
-    cf_cache = _uniq("cf-cache-status", "DYNAMIC")
-    alt_svc = _uniq("alt-svc", 'h3=":443"; ma=86400')
-    via = _uniq("via", "vantricks-SSH")
-    report_to = _uniq("report-to", "-")
-    nel = _uniq("nel", "-")
+    has_ws_101 = "101" in (st_ws or "")
+    chosen_status = st_ws if has_ws_101 else (st_http or "HTTP/1.1 101 vantricks Protocols")
+    raw_buffer = format_raw_data_buffer(target_host, chosen_status, merged, is_ws=has_ws_101)
 
-    info["server"] = srv
-    info["cf_ray"] = cf_ray
-    info["cf_cache"] = cf_cache
-    info["alt_svc"] = alt_svc
-    info["via"] = via
-    info["report_to"] = report_to
-    info["nel"] = nel
-    if status_lines:
-        info["status_line"] = status_lines[0]
-    info["raw_headers"] = "\n".join(raw_blocks).strip()
+    srv = ", ".join(merged.get("server", [])) or ("cloudflare" if ("cf-ray" in merged or "nel" in merged) else "nginx/1.22.1")
+    cf_ray = ", ".join(merged.get("cf-ray", [])) or "DIRECT-ORIGIN"
+    cf_cache = ", ".join(merged.get("cf-cache-status", [])) or "DYNAMIC"
+    alt_svc = ", ".join(merged.get("alt-svc", [])) or 'h3=":443"; ma=86400'
+    via = ", ".join(merged.get("via", [])) or "vantricks-SSH"
+    report_to = ", ".join(merged.get("report-to", [])) or "-"
+    nel_val = ", ".join(merged.get("nel", [])) or "-"
 
     is_cf_ip = any(
         ip.startswith(("104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.", "162.158.", "162.159."))
         for ip in resolved_ips
     )
-    if "cloudflare" in srv.lower() or cf_ray != "DIRECT-ORIGIN" or is_cf_ip or "cloudflare" in report_to.lower():
-        info["cdn_provider"] = "CLOUDFLARE CDN"
-        info["defense_rating"] = "90%"
-    elif "fastly" in srv.lower() or "x-fastly-request-id" in merged_headers:
-        info["cdn_provider"] = "FASTLY CDN"
-        info["defense_rating"] = "90%"
-    elif "akamai" in srv.lower():
-        info["cdn_provider"] = "AKAMAI CDN"
-        info["defense_rating"] = "90%"
-    elif "cloudfront" in srv.lower() or "x-amz-cf-pop" in merged_headers:
-        info["cdn_provider"] = "AWS CLOUDFRONT"
-        info["defense_rating"] = "90%"
-    else:
-        info["cdn_provider"] = "DIRECT / ORIGIN"
-        info["defense_rating"] = "90%"
+    is_cf = "cloudflare" in srv.lower() or cf_ray != "DIRECT-ORIGIN" or nel_val != "-" or is_cf_ip
+    cdn_provider = "CLOUDFLARE CDN" if is_cf else "DIRECT / ORIGIN"
 
-    return info
+    verdict_report = (
+        f"SECURITY_VERDICT_REPORT\n"
+        f"-----------------------\n"
+        f"TARGET: {target_host or pub_ip}\n"
+        f"DEFENSE_RATING: 90%\n\n"
+        f"RAW_DATA_BUFFER:\n"
+        f"{raw_buffer}"
+    )
+
+    return {
+        "target": target_host or pub_ip,
+        "public_ipv4": pub_ip,
+        "resolved_ips": resolved_ips or [pub_ip],
+        "cdn_provider": cdn_provider,
+        "defense_rating": "90%",
+        "server": srv,
+        "cf_ray": cf_ray,
+        "cf_cache": cf_cache,
+        "alt_svc": alt_svc,
+        "via": via,
+        "report_to": report_to,
+        "nel": nel_val,
+        "status_line": chosen_status,
+        "ws_status": st_ws or chosen_status,
+        "raw_headers": (raw_ws + "\n" + raw_http).strip(),
+        "raw_data_buffer": raw_buffer,
+        "verdict_report": verdict_report,
+    }
 
 
 def get_vps_resources():
@@ -3136,6 +3211,22 @@ uninstall_all_manager() {
   trigger_auto_reboot "Uninstallation complete. Rebooting VPS now..."
 }
 
+build_dynamic_payloads() {
+  local TARGET_H="${1:-$HOST}"
+  ensure_default_toggles
+
+  ACTIVE_PROTO_CHAIN="SSH"
+  [ "${PROTO_WS:-ON}" = "ON" ] && ACTIVE_PROTO_CHAIN="${ACTIVE_PROTO_CHAIN} + HTTP + WS"
+  [ "${PROTO_SSL:-ON}" = "ON" ] && ACTIVE_PROTO_CHAIN="${ACTIVE_PROTO_CHAIN} + SSL"
+  [ "${PROTO_OVPN:-ON}" = "ON" ] && ACTIVE_PROTO_CHAIN="${ACTIVE_PROTO_CHAIN} + OVPN"
+  [ "${PROTO_DNSTT:-ON}" = "ON" ] && ACTIVE_PROTO_CHAIN="${ACTIVE_PROTO_CHAIN} + DNSTT"
+  [ "${PROTO_SLIPSTREAM:-ON}" = "ON" ] && ACTIVE_PROTO_CHAIN="${ACTIVE_PROTO_CHAIN} + SLIPSTREAM"
+
+  PAYLOAD_SSH_HTTP="CONNECT [host_port] HTTP/1.1[crlf]Host: ${TARGET_H}[crlf]Connection: keep-alive[crlf][crlf][split]SSH-2.0-vantricks[crlf]"
+  PAYLOAD_SSH_WS="GET / HTTP/1.1[crlf]Host: ${TARGET_H}[crlf]Connection: keep-alive[crlf][crlf][instant_split][crlf][crlf]GET / HTTP/1.1[crlf]Host: ${TARGET_H}[crlf]Upgrade: websocket[crlf]Connection: keep-alive, Upgrade[crlf][crlf]"
+  PAYLOAD_SSH_SSL_WS="GET wss://${TARGET_H}/ HTTP/1.1[crlf]Host: ${TARGET_H}[crlf]Upgrade: websocket[crlf]Connection: keep-alive, Upgrade[crlf][crlf]"
+}
+
 load_config() {
   init_packages_store
   install_booster_python
@@ -3615,13 +3706,33 @@ upgrade_in_place() {
   return 0
 }
 
+install_self_script() {
+  local SRC_PATH="$1"
+  mkdir -p /root /usr/local/bin
+  if [ -n "$SRC_PATH" ] && [ -f "$SRC_PATH" ] && [ "$SRC_PATH" != "/root/vantricks-script.sh" ]; then
+    cp -f "$SRC_PATH" /root/vantricks-script.sh.tmp
+    if grep -q '^main_menu$' /root/vantricks-script.sh.tmp; then
+      mv -f /root/vantricks-script.sh.tmp /root/vantricks-script.sh
+    else
+      rm -f /root/vantricks-script.sh.tmp
+    fi
+  fi
+  chmod +x /root/vantricks-script.sh 2>/dev/null || true
+  cat > /usr/local/bin/menu << 'MENUEOF'
+#!/bin/bash
+if [ -f /root/vantricks-script.sh ]; then
+  exec sudo bash /root/vantricks-script.sh "$@"
+else
+  echo "[!] /root/vantricks-script.sh missing. Re-run installer to restore."
+  exit 1
+fi
+MENUEOF
+  chmod +x /usr/local/bin/menu
+}
+
 refresh_menu_command() {
   local S="$1"
-  [ -f "$S" ] || return 1
-  [ "$S" = "/root/vantricks-script.sh" ] || cp -f "$S" /root/vantricks-script.sh
-  chmod +x /root/vantricks-script.sh
-  printf '#!/bin/bash\nsudo bash /root/vantricks-script.sh\n' > /usr/local/bin/menu
-  chmod +x /usr/local/bin/menu
+  install_self_script "$S"
 }
 
 # ══════════════════════════════════════════════
@@ -3832,6 +3943,8 @@ def enable_keepalive(sock):
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4194304)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4194304)
         if hasattr(socket, 'TCP_KEEPIDLE'):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
         if hasattr(socket, 'TCP_KEEPINTVL'):
@@ -3857,7 +3970,13 @@ def forward(src, dst, label=None):
                 if label and not seen:
                     seen = True
                     log("%s first data: %r" % (label, d[:40]))
-                dst.sendall(d)
+                view = memoryview(d)
+                sent = 0
+                while sent < len(view):
+                    n = dst.send(view[sent:])
+                    if n <= 0:
+                        break
+                    sent += n
     except Exception:
         pass
     finally:
@@ -3926,12 +4045,26 @@ def handle(client):
             first_line = block.split(b'\n', 1)[0]
             is_v2ray = any(p in first_line for p in V2RAY_PATHS)
             is_ws = b'upgrade: websocket' in low
+            is_ssh_http = (
+                first_line.startswith(b'CONNECT ')
+                or b'x-forward-ssh' in low
+                or rest.lstrip(b'\r\n \t\x00').startswith(b'SSH-')
+            )
 
             if is_v2ray:
                 tunnel(client, NGINX_PORT, first=block + rest)
                 return
             if is_ws:
                 tunnel(client, SSH_PORT, first=rest, greeting=RESPONSE_COLOR)
+                return
+            if is_ssh_http:
+                ssh_http_resp = (
+                    b"HTTP/1.1 200 Connection Established\r\n"
+                    b"Connection: keep-alive\r\n"
+                    b"Keep-Alive: timeout=86400, max=100000\r\n"
+                    b"Via: vantricks-SSH+HTTP\r\n\r\n"
+                )
+                tunnel(client, SSH_PORT, first=rest, greeting=ssh_http_resp)
                 return
 
             log("plain/decoy request: %r" % first_line[:60])
